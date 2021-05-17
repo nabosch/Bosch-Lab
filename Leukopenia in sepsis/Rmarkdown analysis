@@ -1,0 +1,139 @@
+# Dataset: ds7: one row per patient. Requests for the dataset can be sent to nabosch@bu.edu
+## Data dictionary
+-HOSPITAL_EXPIRE_FLAG: hospital mortality (0=yes, 1=no)
+-minwbc24: minimum white blood cell count 48 hours before to 24 hours after the onset of suspected infection
+-maxwbc24: maximum white blood cell count 48 hours before to 24 hours after the onset of suspected infection
+-wbc_cat: white blood cell count category: Leukopenia (WBC <4000/μL), normal (WBC 4000-10,000 /μL), and leukocytosis (WBC >10,000 /μL)
+-SOFA_24hours: total SOFA score over last 24 hrs 
+-coagulation_24hours: coagulation SOFA score over last 24 hours
+-respiration_24hours: respiratory SOFA score over last 24 hours
+-cardiovascular_24hours: cardiovascular SOFA over last 24 hours
+-liver_24hours: liver SOFA score over last 24 hours
+-renal_24hours: renal SOFA score over last 24 hours
+-cns_24hours: CNS SOFA score over last 24 hours
+-GENDER: 1=male, 2=female  
+-RACECAT: 1=black, 2=white, 3=Hispanic, 4=Asian, 5=other, 9=unknown  
+-AGE: Age in years
+-elixhauser_vanwalraven: Elixhauser comorbidity score modified by vanwalraven
+-infection: source of sepsis
+
+
+# analyses
+- Requires package mfp and tableone
+```{r analyses}
+#table 1
+myvars <- c("AGE", "GENDER", "RACECAT", "elixhauser_vanwalraven", "SOFA_24hours", "minwbc24", "maxwbc24", "wbc_cat", "HOSPITAL_EXPIRE_FLAG", "infection")
+catvars <- c("GENDER", "RACECAT", "wbc_cat", "HOSPITAL_EXPIRE_FLAG", "infection")
+tab1<-CreateTableOne(vars=myvars, data=ds7, factorVars=catvars)
+
+#correlation
+plot(ds7$leuk, ds7$minwbc24)
+cor.test(wbc2$leuk, wbc2$minwbc24)
+
+# Models
+#mortality = wbc category (leukocytosis is comparator)
+catmodel1<-glm(HOSPITAL_EXPIRE_FLAG~wbc_cat, data=ds7, family=binomial(link="logit"))
+
+#mortality = spline wbc
+model1<-mfp(HOSPITAL_EXPIRE_FLAG~ns(minwbc24, knots=c(4,10)), data=ds7, family=binomial(link="logit"))
+
+#mortality =  wbc category (leukocytosis is comparator) + sofa
+catmodel2<-mfp::mfp(HOSPITAL_EXPIRE_FLAG~wbc_cat+SOFA_24hours, data=ds7, family=binomial(link="logit"))
+
+#mortality =  wbc category (leukocytosis is comparator) + sofa_coag
+catmodel2_coag<-mfp::mfp(HOSPITAL_EXPIRE_FLAG~wbc_cat+coagulation_24hours, data=ds7, family=binomial(link="logit"))
+
+#mortality =  wbc category (leukocytosis is comparator) + sofa_resp
+catmodel2_resp<-mfp::mfp(HOSPITAL_EXPIRE_FLAG~wbc_cat+respiration_24hours, data=ds7, family=binomial(link="logit"))
+summary(catmodel2_resp)
+
+#mortality =  wbc category (leukocytosis is comparator) + sofa_card
+catmodel2_card<-mfp::mfp(HOSPITAL_EXPIRE_FLAG~wbc_cat+cardiovascular_24hours, data=ds7, family=binomial(link="logit"))
+
+#mortality =  wbc category (leukocytosis is comparator) + sofa_liver
+catmodel2_liver<-mfp::mfp(HOSPITAL_EXPIRE_FLAG~wbc_cat+liver_24hours, data=ds7, family=binomial(link="logit"))
+
+#mortality =  wbc category (leukocytosis is comparator) + sofa_cns
+catmodel2_cns<-mfp::mfp(HOSPITAL_EXPIRE_FLAG~wbc_cat+cns_24hours, data=ds7, family=binomial(link="logit"))
+
+#mortality =  wbc category (leukocytosis is comparator) + sofa_renal
+catmodel2_renal<-mfp::mfp(HOSPITAL_EXPIRE_FLAG~wbc_cat+renal_24hours, data=ds7, family=binomial(link="logit"))
+summary(catmodel2_renal)
+
+#mortality = spline wbc + sofa
+model2<-mfp::mfp(HOSPITAL_EXPIRE_FLAG~ns(minwbc24, knots=c(4,10))+SOFA_24hours, data=ds7, family=binomial(link="logit"))
+
+#mortality = wbc category (leukocytosis is comparator) + full covariates
+catmodel3<-mfp::mfp(HOSPITAL_EXPIRE_FLAG~wbc_cat+SOFA_24hours+fp(AGE)+GENDER+RACECAT+fp(elixhauser_vanwalraven), data=ds7, family=binomial(link="logit"))
+
+#mortality =  full covariates
+catmodel4<-mfp::mfp(HOSPITAL_EXPIRE_FLAG~SOFA_24hours+fp(AGE)+GENDER+RACECAT+fp(elixhauser_vanwalraven), data=ds7, family=binomial(link="logit"))
+
+#mortality = wbc category (leukocytosis is comparator) + full covariates (EXCEPT SOFA CHANGED TO SOFA-COAG)
+catmodel3_nocoag<-mfp::mfp(HOSPITAL_EXPIRE_FLAG~wbc_cat+sofa_no_coag+fp(AGE)+GENDER+RACECAT+fp(elixhauser_vanwalraven), data=ds7, family=binomial(link="logit"))
+
+#mortality = full covariates (EXCEPT SOFA CHANGED TO SOFA-COAG)
+catmodel3a_nocoag<-mfp::mfp(HOSPITAL_EXPIRE_FLAG~sofa_no_coag+fp(AGE)+GENDER+RACECAT+fp(elixhauser_vanwalraven), data=ds7, family=binomial(link="logit"))
+
+#mortality = wbc category (leukocytosis is comparator) + full covariates (EXCEPT SOFA CHANGED TO SOFA-RESP)
+catmodel3_noresp<-mfp::mfp(HOSPITAL_EXPIRE_FLAG~wbc_cat+sofa_no_resp+fp(AGE)+GENDER+RACECAT+fp(elixhauser_vanwalraven), data=ds7, family=binomial(link="logit"))
+summary(catmodel3_noresp)
+
+#mortality = wbc category (leukocytosis is comparator) + full covariates (EXCEPT SOFA CHANGED TO SOFA-CARDS)
+catmodel3_nocard<-mfp::mfp(HOSPITAL_EXPIRE_FLAG~wbc_cat+sofa_no_card+fp(AGE)+GENDER+RACECAT+fp(elixhauser_vanwalraven), data=ds7, family=binomial(link="logit"))
+
+#mortality = wbc category (leukocytosis is comparator) + full covariates (EXCEPT SOFA CHANGED TO SOFA-liver)
+catmodel3_noliver<-mfp::mfp(HOSPITAL_EXPIRE_FLAG~wbc_cat+sofa_no_liver+fp(AGE)+GENDER+RACECAT+fp(elixhauser_vanwalraven), data=ds7, family=binomial(link="logit"))
+
+#mortality = wbc category (leukocytosis is comparator) + full covariates (EXCEPT SOFA CHANGED TO SOFA-cns)
+catmodel3_nocns<-mfp::mfp(HOSPITAL_EXPIRE_FLAG~wbc_cat+sofa_no_cns+fp(AGE)+GENDER+RACECAT+fp(elixhauser_vanwalraven), data=ds7, family=binomial(link="logit"))
+
+#mortality = wbc category (leukocytosis is comparator) + full covariates (EXCEPT SOFA CHANGED TO SOFA-renal)
+catmodel3_norenal<-mfp::mfp(HOSPITAL_EXPIRE_FLAG~wbc_cat+sofa_no_renal+fp(AGE)+GENDER+RACECAT+fp(elixhauser_vanwalraven), data=ds7, family=binomial(link="logit"))
+
+#mortality = wbc category 2 (normal is comparator) + full covariates
+catmodel3_norm_abnorm<-mfp::mfp(HOSPITAL_EXPIRE_FLAG~wbc_cat2+SOFA_24hours+fp(AGE)+GENDER+RACECAT+fp(elixhauser_vanwalraven), data=ds7, family=binomial(link="logit"))
+
+#mortality = spline wbc + full covariates
+model3<-mfp::mfp(HOSPITAL_EXPIRE_FLAG~ns(minwbc24, knots=c(4,10))+SOFA_24hours+fp(AGE)+GENDER+RACECAT+fp(elixhauser_vanwalraven), data=ds7, family=binomial(link="logit"))
+
+#mortality = fractional polynomial wbc + full covariates
+model4<-mfp::mfp(HOSPITAL_EXPIRE_FLAG~fp(minwbc24)+SOFA_24hours+fp(AGE)+GENDER+RACECAT+fp(elixhauser_vanwalraven), data=ds7, family=binomial(link="logit"))
+
+# ROC calculations
+#full model wbc_cat (penia, normal, cytosis)
+pred <- predict(catmodel3)
+pred_rocr <- ROCR::prediction(pred, labels = ds7$HOSPITAL_EXPIRE_FLAG)
+auc <- ROCR::performance(pred_rocr, measure = "auc", x.measure = "cutoff")
+auc_wbc_cat<-auc@y.values[[1]]
+auc_wbc_cat
+
+#full model no wbc_cat
+pred <- predict(catmodel4)
+pred_rocr <- ROCR::prediction(pred, labels = ds7$HOSPITAL_EXPIRE_FLAG)
+auc <- ROCR::performance(pred_rocr, measure = "auc", x.measure = "cutoff")
+auc_wbc_cat4<-auc@y.values[[1]]
+auc_wbc_cat4
+
+#full model wbc_cat (penia, normal, cytosis) but remove sofa coag
+pred <- predict(catmodel3_nocoag)
+pred_rocr <- ROCR::prediction(pred, labels = ds7$HOSPITAL_EXPIRE_FLAG)
+auc <- ROCR::performance(pred_rocr, measure = "auc", x.measure = "cutoff")
+auc_wbc_cat_nocoag<-auc@y.values[[1]]
+auc_wbc_cat_nocoag
+
+#full model no wbc+cat and remove sofa coag
+pred <- predict(catmodel3a_nocoag)
+pred_rocr <- ROCR::prediction(pred, labels = ds7$HOSPITAL_EXPIRE_FLAG)
+auc <- ROCR::performance(pred_rocr, measure = "auc", x.measure = "cutoff")
+auc_3a_nocoag<-auc@y.values[[1]]
+auc_3a_nocoag
+
+
+#full model wbc_cat 2 (normal, abnormal)
+pred <- predict(catmodel3_norm_abnorm)
+pred_rocr <- ROCR::prediction(pred, labels = ds7$HOSPITAL_EXPIRE_FLAG)
+auc <- ROCR::performance(pred_rocr, measure = "auc", x.measure = "cutoff")
+auc_wbc_cat<-auc@y.values[[1]]
+auc_wbc_cat
+```
