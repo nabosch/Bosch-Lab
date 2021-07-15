@@ -111,9 +111,6 @@ msofa<-msofa %>% group_by(stay_id, sofa_time) %>% arrange(desc(msofa)) %>% slice
 bg$lac_time<-as.numeric(as.POSIXct(bg$charttime))/60 #minutes
 bg$lac<-bg$lactate
 lac<-bg[!is.na(bg$lactate),c("subject_id","hadm_id","lac_time","lac")]
-vit$temp_time<-as.numeric(as.POSIXct(vit$charttime))/60 #minutes
-vit$temp<-vit$temperature
-temp<-vit[!is.na(vit$charttime),c("subject_id","stay_id","temp_time","temp")]
 ```
 ## Time and baseline table wrangling - eICU 
 ```{r datawrangling1_eicu, echo=FALSE}
