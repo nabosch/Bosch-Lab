@@ -1,0 +1,1198 @@
+---
+title: "eICU SOFA"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: united
+---
+
+
+```{r setup, include=FALSE}
+library(dplyr)
+library(ggplot2)
+library(haven)
+library(tidyr)
+library(Hmisc)
+library(tableone)
+library(DescTools)
+library(zoo)
+library(lubridate)
+library(stringr)
+knitr::opts_chunk$set(echo = FALSE)
+Sys.setenv(TZ = "EST")
+
+#CUSTOM FUNCTIONS
+na.locf2 <- function(x) {na.locf(x, na.rm = FALSE)}
+```
+
+This R script allows creation of a time-varying sofa score for all patients in eICU. This version uses last observation carried forward (indefinitely in the past) and assumes that missing data is associated with a score of 0 for that organ score. 
+
+# Dataset Setup
+## Import
+```{r import}
+nori<-read.csv(file="infusion_norepinephrine.csv", stringsAsFactors = FALSE)
+norm<-read.csv(file="medication_norepinephrine.csv", stringsAsFactors = FALSE)
+dopi<-read.csv(file="infusion_dopamine.csv", stringsAsFactors = FALSE)
+epii<-read.csv(file="infusion_epinephrine.csv", stringsAsFactors = FALSE)
+epim<-read.csv(file="medication_epinephrine.csv", stringsAsFactors = FALSE)
+dobi<-read.csv(file="infusion_dobutamine.csv", stringsAsFactors = FALSE)
+imap<-read.csv(file="imap.csv", stringsAsFactors = FALSE)
+nmap<-read.csv(file="nmap.csv", stringsAsFactors = FALSE)
+sol<-read.csv(file="sofalabs.csv", stringsAsFactors = FALSE)
+fir<-read.csv(file="fio2rc.csv", stringsAsFactors = FALSE)
+fin<-read.csv(file="fio2nc.csv", stringsAsFactors = FALSE)
+gcs<-read.csv(file="gcs.csv", stringsAsFactors = FALSE)
+mv<-read.csv(file="philipseriventilationepisode.csv", stringsAsFactors = FALSE)
+uop<-read.csv(file="uop.csv", stringsAsFactors = FALSE)
+pt<-read.csv(file="patient.csv", stringsAsFactors = FALSE)
+sao2<-read.csv(file="sao2.csv", stringsAsFactors = FALSE)
+```
+
+
+## Cardiovascular Sofa
+```{r cards}
+## norepinephrine
+norm <- norm %>% rename(med_drugname=drugname)
+nor<-left_join(nori,norm)
+nor<-left_join(nor,pt[,c("patientunitstayid","admissionweight","dischargeweight","gender")])
+nor$patientweight[is.na(nor$patientweight)]<-nor$admissionweight[is.na(nor$patientweight)] #using (1)admission weight or (2)discharge weight for patient weight (dosing weight) if patient weight missing
+nor$patientweight[is.na(nor$patientweight) & is.na(nor$admissionweight)]<-nor$dischargeweight[is.na(nor$patientweight) & is.na(nor$admissionweight)]
+nor$patientweight[(is.na(nor$patientweight)|nor$patientweight<=10) & nor$gender=="Male"]<-90 #if still missing assume, 75kg in women, 90kg in men
+nor$patientweight[(is.na(nor$patientweight)|nor$patientweight<=10) & nor$gender=="Female"]<-75 
+nor$time<-nor$infusionoffset
+
+
+### norepinephrine dose conversions
+nor$drugrate<-as.numeric(nor$drugrate)
+nor<-nor[!is.na(nor$drugrate),] #removing those with drugrates that are missing after conversion to numeric
+nor$nordose<-NA
+
+#### mcg/min to mcg/kg/min
+nor$nordose[nor$drugname=="levophed  (mcg/min)"|
+              nor$drugname=="levophed (mcg/min)"|
+              nor$drugname=="Levophed (mcg/min)"|
+              nor$drugname=="Norepinephrine (mcg/min)"|
+              nor$drugname=="Norepinephrine MAX 32 mg Dextrose 5% 250 ml (mcg/min)"|
+              nor$drugname=="Norepinephrine MAX 32 mg Dextrose 5% 500 ml (mcg/min)"|
+              nor$drugname=="Norepinephrine STD 32 mg Dextrose 5% 282 ml (mcg/min)"|
+              nor$drugname=="Norepinephrine STD 32 mg Dextrose 5% 500 ml (mcg/min)"|
+              nor$drugname=="Norepinephrine STD 4 mg Dextrose 5% 250 ml (mcg/min)"|
+              nor$drugname=="Norepinephrine STD 4 mg Dextrose 5% 500 ml (mcg/min)"|
+              nor$drugname=="Norepinephrine STD 8 mg Dextrose 5% 250 ml (mcg/min)"|
+              nor$drugname=="Norepinephrine STD 8 mg Dextrose 5% 500 ml (mcg/min)"]<-nor$drugrate[nor$drugname=="levophed  (mcg/min)"|
+              nor$drugname=="levophed (mcg/min)"|
+              nor$drugname=="Levophed (mcg/min)"|
+              nor$drugname=="Norepinephrine (mcg/min)"|
+              nor$drugname=="Norepinephrine MAX 32 mg Dextrose 5% 250 ml (mcg/min)"|
+              nor$drugname=="Norepinephrine MAX 32 mg Dextrose 5% 500 ml (mcg/min)"|
+              nor$drugname=="Norepinephrine STD 32 mg Dextrose 5% 282 ml (mcg/min)"|
+              nor$drugname=="Norepinephrine STD 32 mg Dextrose 5% 500 ml (mcg/min)"|
+              nor$drugname=="Norepinephrine STD 4 mg Dextrose 5% 250 ml (mcg/min)"|
+              nor$drugname=="Norepinephrine STD 4 mg Dextrose 5% 500 ml (mcg/min)"|
+              nor$drugname=="Norepinephrine STD 8 mg Dextrose 5% 250 ml (mcg/min)"|
+              nor$drugname=="Norepinephrine STD 8 mg Dextrose 5% 500 ml (mcg/min)"]/nor$patientweight[nor$drugname=="levophed  (mcg/min)"|
+              nor$drugname=="levophed (mcg/min)"|
+              nor$drugname=="Levophed (mcg/min)"|
+              nor$drugname=="Norepinephrine (mcg/min)"|
+              nor$drugname=="Norepinephrine MAX 32 mg Dextrose 5% 250 ml (mcg/min)"|
+              nor$drugname=="Norepinephrine MAX 32 mg Dextrose 5% 500 ml (mcg/min)"|
+              nor$drugname=="Norepinephrine STD 32 mg Dextrose 5% 282 ml (mcg/min)"|
+              nor$drugname=="Norepinephrine STD 32 mg Dextrose 5% 500 ml (mcg/min)"|
+              nor$drugname=="Norepinephrine STD 4 mg Dextrose 5% 250 ml (mcg/min)"|
+              nor$drugname=="Norepinephrine STD 4 mg Dextrose 5% 500 ml (mcg/min)"|
+              nor$drugname=="Norepinephrine STD 8 mg Dextrose 5% 250 ml (mcg/min)"|
+              nor$drugname=="Norepinephrine STD 8 mg Dextrose 5% 500 ml (mcg/min)"]
+
+#### mcg/kg/min
+nor$nordose[nor$drugname=="Levophed (mcg/kg/min)"|
+              nor$drugname=="Norepinephrine (mcg/kg/min)"]<-nor$drugrate[nor$drugname=="Levophed (mcg/kg/min)"|
+              nor$drugname=="Norepinephrine (mcg/kg/min)"]
+
+#### mg/kg/min (entries appear to be inaccurately recorded as mg (doses instead appear to be mcg)
+nor$nordose[nor$drugname=="Norepinephrine (mg/kg/min)"]<-nor$drugrate[nor$drugname=="Norepinephrine (mg/kg/min)"]
+
+#### mcg/hr
+nor$nordose[nor$drugname=="Norepinephrine (mcg/hr)"]<-nor$drugrate[nor$drugname=="Norepinephrine (mcg/hr)"]/60/nor$patientweight[nor$drugname=="Norepinephrine (mcg/hr)"]
+
+#### mcg/kg/hr
+nor$nordose[nor$drugname=="Norepinephrine (mcg/kg/hr)"]<-nor$drugrate[nor$drugname=="Norepinephrine (mcg/kg/hr)"]/60
+
+#### mg/hr
+nor$nordose[nor$drugname=="Levophed (mg/hr)"|
+              nor$drugname=="Norepinephrine (mg/hr)"]<-nor$drugrate[nor$drugname=="Levophed (mg/hr)"|
+              nor$drugname=="Norepinephrine (mg/hr)"]*(1000/60)/nor$patientweight[nor$drugname=="Levophed (mg/hr)"|
+              nor$drugname=="Norepinephrine (mg/hr)"]
+
+#### mg/min (appears to be inaccurately recorded as mg (doses instead appear to be mcg)
+nor$nordose[nor$drugname=="Norepinephrine (mg/min)"]<-nor$drugrate[nor$drugname=="Norepinephrine (mg/min)"]/nor$patientweight[nor$drugname=="Norepinephrine (mg/min)"]
+
+#### units/min (appears to be recorded in units of mcg/min)
+nor$nordose[nor$drugname=="Norepinephrine (units/min)"]<-nor$drugrate[nor$drugname=="Norepinephrine (units/min)"]/nor$patientweight[nor$drugname=="Norepinephrine (units/min)"]
+
+
+#### ml/hr 8mg/250ml medication table concentration
+nor$nordose[(nor$drugname=="levophed (ml/hr)"|
+              nor$drugname=="Levophed (ml/hr)"|
+              nor$drugname=="Norepinephrine (ml/hr)"|
+              nor$drugname=="norepinephrine Volume (ml) (ml/hr)") &
+              (!is.na(nor$med_drugname) &
+                 (nor$med_drugname=="250 ML PLAS CONT : NOREPINEPHRINE IN D5W 8 MG/250 ML"|
+                    nor$med_drugname=="NOREPINEPHRINE 8 MG in 250mL NS"))]<-nor$drugrate[(nor$drugname=="levophed (ml/hr)"|
+              nor$drugname=="Levophed (ml/hr)"|
+              nor$drugname=="Norepinephrine (ml/hr)"|
+              nor$drugname=="norepinephrine Volume (ml) (ml/hr)") &
+              (!is.na(nor$med_drugname) &
+                 (nor$med_drugname=="250 ML PLAS CONT : NOREPINEPHRINE IN D5W 8 MG/250 ML"|
+                    nor$med_drugname=="NOREPINEPHRINE 8 MG in 250mL NS"))]*(32/60)/nor$patientweight[(nor$drugname=="levophed (ml/hr)"|
+              nor$drugname=="Levophed (ml/hr)"|
+              nor$drugname=="Norepinephrine (ml/hr)"|
+              nor$drugname=="norepinephrine Volume (ml) (ml/hr)") &
+              (!is.na(nor$med_drugname) &
+                 (nor$med_drugname=="250 ML PLAS CONT : NOREPINEPHRINE IN D5W 8 MG/250 ML"|
+                    nor$med_drugname=="NOREPINEPHRINE 8 MG in 250mL NS"))]
+
+#### ml/hr 4mg/250ml medication table concentration
+nor$nordose[(nor$drugname=="levophed (ml/hr)"|
+              nor$drugname=="Levophed (ml/hr)"|
+              nor$drugname=="Norepinephrine (ml/hr)"|
+              nor$drugname=="norepinephrine Volume (ml) (ml/hr)") &
+              (!is.na(nor$med_drugname) &
+                 (nor$med_drugname=="NOREPINEPHRINE 4 MG/250 ML NS"|
+                    nor$med_drugname=="NOREPINEPHRINE 4 MG/250 ML NS INFUSION (STD CON'C) (REPACKAGE)"|
+                    nor$med_drugname=="PRMX NOREPInephrine 4 mg/250 mL NS Drip"))]<-nor$drugrate[(nor$drugname=="levophed (ml/hr)"|
+              nor$drugname=="Levophed (ml/hr)"|
+              nor$drugname=="Norepinephrine (ml/hr)"|
+              nor$drugname=="norepinephrine Volume (ml) (ml/hr)") &
+              (!is.na(nor$med_drugname) &
+                 (nor$med_drugname=="NOREPINEPHRINE 4 MG/250 ML NS"|
+                    nor$med_drugname=="NOREPINEPHRINE 4 MG/250 ML NS INFUSION (STD CON'C) (REPACKAGE)"|
+                    nor$med_drugname=="PRMX NOREPInephrine 4 mg/250 mL NS Drip"))]*(16/60)/nor$patientweight[(nor$drugname=="levophed (ml/hr)"|
+              nor$drugname=="Levophed (ml/hr)"|
+              nor$drugname=="Norepinephrine (ml/hr)"|
+              nor$drugname=="norepinephrine Volume (ml) (ml/hr)") &
+              (!is.na(nor$med_drugname) &
+                 (nor$med_drugname=="NOREPINEPHRINE 4 MG/250 ML NS"|
+                    nor$med_drugname=="NOREPINEPHRINE 4 MG/250 ML NS INFUSION (STD CON'C) (REPACKAGE)"|
+                    nor$med_drugname=="PRMX NOREPInephrine 4 mg/250 mL NS Drip"))]
+
+
+#### no infusion units but entry has drug amount and volume of fluid labeled in convertible fashion (e.g. 4 in 250 -> 16/1000)
+nor$nordose[(is.na(nor$nordose)) & nor$volumeoffluid==250 & nor$drugamount==4 & !is.na(nor$volumeoffluid) & !is.na(nor$drugamount)]<-nor$drugrate[(is.na(nor$nordose)) & nor$volumeoffluid==250 & nor$drugamount==4 & !is.na(nor$volumeoffluid) & !is.na(nor$drugamount)]*(16/60)/nor$patientweight[(is.na(nor$nordose)) & nor$volumeoffluid==250 & nor$drugamount==4 & !is.na(nor$volumeoffluid) & !is.na(nor$drugamount)]
+
+#### ml/hr no medication table concentration (assumed concentration of 16mg/1000ml)
+nor$nordose[(nor$drugname=="levophed (ml/hr)"|
+              nor$drugname=="Levophed (ml/hr)"|
+              nor$drugname=="Norepinephrine (ml/hr)"|
+              nor$drugname=="norepinephrine Volume (ml) (ml/hr)") &
+              (is.na(nor$nordose))]<-nor$drugrate[(nor$drugname=="levophed (ml/hr)"|
+              nor$drugname=="Levophed (ml/hr)"|
+              nor$drugname=="Norepinephrine (ml/hr)"|
+              nor$drugname=="norepinephrine Volume (ml) (ml/hr)") &
+              (is.na(nor$nordose))]*(16/60)/nor$patientweight[(nor$drugname=="levophed (ml/hr)"|
+              nor$drugname=="Levophed (ml/hr)"|
+              nor$drugname=="Norepinephrine (ml/hr)"|
+              nor$drugname=="norepinephrine Volume (ml) (ml/hr)") &
+              (is.na(nor$nordose))]
+
+#### fixing 0 values
+nor$nordose[is.na(nor$nordose) & nor$drugrate==0]<-0
+
+
+
+#creating marker for norepinephrine for remaining doses that couldn't be converted
+nor$nor<-0
+nor$nor[!is.na(nor$nordose)]<-1
+
+
+## dopamine
+dop<-dopi
+dop<-left_join(dop,pt[,c("patientunitstayid","admissionweight","dischargeweight","gender")])
+dop$patientweight[is.na(dop$patientweight)]<-dop$admissionweight[is.na(dop$patientweight)] #using (1)admission weight or (2)discharge weight for patient weight (dosing weight) if patient weight missing
+dop$patientweight[is.na(dop$patientweight) & is.na(dop$admissionweight)]<-dop$dischargeweight[is.na(dop$patientweight) & is.na(dop$admissionweight)]
+dop$patientweight[(is.na(dop$patientweight)|dop$patientweight<=10) & dop$gender=="Male"]<-90 #if still missing assume, 75kg in women, 90kg in men
+dop$patientweight[(is.na(dop$patientweight)|dop$patientweight<=10) & dop$gender=="Female"]<-75 
+dop$time<-dop$infusionoffset
+
+
+### dopamine dose conversions
+dop$drugrate<-as.numeric(dop$drugrate)
+dop<-dop[!is.na(dop$drugrate),] #removing those with drugrates that are missing after conversion to numeric
+dop$dopdose<-NA
+
+#### mcg/min to mcg/kg/min
+dop$dopdose[dop$drugname=="Dopamine (mcg/min)"]<-dop$drugrate[dop$drugname=="Dopamine (mcg/min)"]/dop$patientweight[dop$drugname=="Dopamine (mcg/min)"]
+
+#### mcg/kg/min (includes nanograms which appears to be mistake in eicu and should be in units of mcg)
+dop$dopdose[dop$drugname=="dopamine (mcg/kg/min)"|
+              dop$drugname=="Dopamine (mcg/kg/min)"|
+              dop$drugname=="Dopamine (nanograms/kg/min)"|
+              dop$drugname=="DOPamine MAX 800 mg Dextrose 5% 250 ml  Premix (mcg/kg/min)"|
+              dop$drugname=="DOPamine STD 15 mg Dextrose 5% 250 ml  Premix (mcg/kg/min)"|
+              dop$drugname=="DOPamine STD 400 mg Dextrose 5% 250 ml  Premix (mcg/kg/min)"|
+              dop$drugname=="DOPamine STD 400 mg Dextrose 5% 500 ml  Premix (mcg/kg/min)"
+            ]<-dop$drugrate[dop$drugname=="dopamine (mcg/kg/min)"|
+              dop$drugname=="Dopamine (mcg/kg/min)"|
+                dop$drugname=="Dopamine (nanograms/kg/min)"|
+                dop$drugname=="DOPamine MAX 800 mg Dextrose 5% 250 ml  Premix (mcg/kg/min)"|
+                dop$drugname=="DOPamine STD 15 mg Dextrose 5% 250 ml  Premix (mcg/kg/min)"|
+                dop$drugname=="DOPamine STD 400 mg Dextrose 5% 250 ml  Premix (mcg/kg/min)"| dop$drugname=="DOPamine STD 400 mg Dextrose 5% 500 ml  Premix (mcg/kg/min)"]
+
+
+#### mcg/kg/hr 
+dop$dopdose[dop$drugname=="Dopamine (mcg/kg/hr)"]<-dop$drugrate[dop$drugname=="Dopamine (mcg/kg/hr)"]/60
+
+#### mcg/hr
+dop$dopdose[dop$drugname=="Dopamine (mcg/hr)"]<-dop$drugrate[dop$drugname=="Dopamine (mcg/hr)"]/60/dop$patientweight[dop$drugname=="Dopamine (mcg/hr)"]
+
+
+#### mg/hr
+dop$dopdose[dop$drugname=="Dopamine (mg/hr)"]<-dop$drugrate[dop$drugname=="Dopamine (mg/hr)"]*(1000/60)/dop$patientweight[dop$drugname=="Dopamine (mg/hr)"]
+
+#### no infusion units but entry has drug amount and volume of fluid labeled in convertible fashion (e.g. 4 in 250 -> 16/1000)
+dop$dopdose[is.na(dop$dopdose) & dop$volumeoffluid==250 & dop$drugamount==400 & !is.na(dop$volumeoffluid) & !is.na(dop$drugamount)]<-dop$drugrate[is.na(dop$dopdose) & dop$volumeoffluid==250 & dop$drugamount==400 & !is.na(dop$volumeoffluid) & !is.na(dop$drugamount)]*(1600/60)/dop$patientweight[is.na(dop$dopdose) & dop$volumeoffluid==250 & dop$drugamount==400 & !is.na(dop$volumeoffluid) & !is.na(dop$drugamount)]
+
+#### ml/hr no medication table concentration (assumed concentration of 400 mg in 250 mL (concentration: 1600 mcg/mL))
+dop$dopdose[(dop$drugname=="Dopamine (ml/hr)") &
+              (is.na(dop$dopdose))]<-dop$drugrate[(dop$drugname=="Dopamine (ml/hr)") &
+              (is.na(dop$dopdose))]*(1600/60)/dop$patientweight[(dop$drugname=="Dopamine (ml/hr)") &
+              (is.na(dop$dopdose))]
+
+#### fixing 0 values
+dop$dopdose[is.na(dop$dopdose) & dop$drugrate==0]<-0
+
+#creating marker for dopamine for remaining doses that couldn't be converted
+dop$dop<-0
+dop$dop[!is.na(dop$dopdose)]<-1
+
+
+
+
+
+
+
+## epinephrine
+epim <- epim %>% rename(med_drugname=drugname)
+epi<-left_join(epii,epim)
+epi<-left_join(epi,pt[,c("patientunitstayid","admissionweight","dischargeweight","gender")])
+epi$patientweight[is.na(epi$patientweight)]<-epi$admissionweight[is.na(epi$patientweight)] #using (1)admission weight or (2)discharge weight for patient weight (dosing weight) if patient weight missing
+epi$patientweight[is.na(epi$patientweight) & is.na(epi$admissionweight)]<-epi$dischargeweight[is.na(epi$patientweight) & is.na(epi$admissionweight)]
+epi$patientweight[(is.na(epi$patientweight)|epi$patientweight<=10) & epi$gender=="Male"]<-90 #if still missing assume, 75kg in women, 90kg in men
+epi$patientweight[(is.na(epi$patientweight)|epi$patientweight<=10) & epi$gender=="Female"]<-75 
+epi$time<-epi$infusionoffset
+
+
+### epinephrine dose conversions
+epi$drugrate<-as.numeric(epi$drugrate)
+epi<-epi[!is.na(epi$drugrate),] #removing those with drugrates that are missing after conversion to numeric
+epi$epidose<-NA
+
+#### mcg/min to mcg/kg/min
+epi$epidose[epi$drugname=="EPI (mcg/min)"|
+              epi$drugname=="Epinepherine (mcg/min)"|
+              epi$drugname=="Epinephrine (mcg/min)"|
+              epi$drugname=="EPINEPHrine(Adrenalin)MAX 30 mg Sodium Chloride 0.9% 250 ml (mcg/min)"|
+              epi$drugname=="EPINEPHrine(Adrenalin)STD 4 mg Sodium Chloride 0.9% 250 ml (mcg/min)"|
+              epi$drugname=="EPINEPHrine(Adrenalin)STD 4 mg Sodium Chloride 0.9% 500 ml (mcg/min)"|
+              epi$drugname=="EPINEPHrine(Adrenalin)STD 7 mg Sodium Chloride 0.9% 250 ml (mcg/min)"]<-epi$drugrate[epi$drugname=="EPI (mcg/min)"|
+              epi$drugname=="Epinepherine (mcg/min)"|
+              epi$drugname=="Epinephrine (mcg/min)"|
+              epi$drugname=="EPINEPHrine(Adrenalin)MAX 30 mg Sodium Chloride 0.9% 250 ml (mcg/min)"|
+              epi$drugname=="EPINEPHrine(Adrenalin)STD 4 mg Sodium Chloride 0.9% 250 ml (mcg/min)"|
+              epi$drugname=="EPINEPHrine(Adrenalin)STD 4 mg Sodium Chloride 0.9% 500 ml (mcg/min)"|
+              epi$drugname=="EPINEPHrine(Adrenalin)STD 7 mg Sodium Chloride 0.9% 250 ml (mcg/min)"]/epi$patientweight[epi$drugname=="EPI (mcg/min)"|
+              epi$drugname=="Epinepherine (mcg/min)"|
+              epi$drugname=="Epinephrine (mcg/min)"|
+              epi$drugname=="EPINEPHrine(Adrenalin)MAX 30 mg Sodium Chloride 0.9% 250 ml (mcg/min)"|
+              epi$drugname=="EPINEPHrine(Adrenalin)STD 4 mg Sodium Chloride 0.9% 250 ml (mcg/min)"|
+              epi$drugname=="EPINEPHrine(Adrenalin)STD 4 mg Sodium Chloride 0.9% 500 ml (mcg/min)"|
+              epi$drugname=="EPINEPHrine(Adrenalin)STD 7 mg Sodium Chloride 0.9% 250 ml (mcg/min)"]
+
+#### mcg/kg/min
+epi$epidose[epi$drugname=="Epinephrine (mcg/kg/min)"]<-epi$drugrate[epi$drugname=="Epinephrine (mcg/kg/min)"]
+
+#### mg/kg/min (entries appear to be inaccurately recorded as mg (doses instead appear to be mcg)
+epi$epidose[epi$drugname=="Epinephrine (mg/kg/min)"]<-epi$drugrate[epi$drugname=="Epinephrine (mg/kg/min)"]
+
+#### mcg/hr
+epi$epidose[epi$drugname=="Epinephrine (mcg/hr)"]<-epi$drugrate[epi$drugname=="Epinephrine (mcg/hr)"]/60/epi$patientweight[epi$drugname=="Epinephrine (mcg/hr)"]
+
+
+#### mg/hr
+epi$epidose[epi$drugname=="Epinephrine (mg/hr)"]<-epi$drugrate[epi$drugname=="Epinephrine (mg/hr)"]*(1000/60)/epi$patientweight[epi$drugname=="Epinephrine (mg/hr)"]
+
+
+#### ml/hr 8mg/250ml medication table concentration
+epi$epidose[epi$drugname=="Epinephrine (ml/hr)" &
+              !is.na(epi$med_drugname) &
+                 epi$med_drugname=="EPINEPHrine 8 MG in 250 mL NS"]<-epi$drugrate[epi$drugname=="Epinephrine (ml/hr)" &
+              !is.na(epi$med_drugname) &
+                 epi$med_drugname=="EPINEPHrine 8 MG in 250 mL NS"]*(32/60)/epi$patientweight[epi$drugname=="Epinephrine (ml/hr)" &
+              !is.na(epi$med_drugname) &
+                 epi$med_drugname=="EPINEPHrine 8 MG in 250 mL NS"]
+
+
+#### no infusion units but entry has drug amount and volume of fluid labeled in convertible fashion (e.g. 4 in 250 -> 16/1000)
+epi$epidose[(is.na(epi$epidose)) & epi$volumeoffluid==250 & epi$drugamount==4 & !is.na(epi$volumeoffluid) & !is.na(epi$drugamount)]<-epi$drugrate[(is.na(epi$epidose)) & epi$volumeoffluid==250 & epi$drugamount==4 & !is.na(epi$volumeoffluid) & !is.na(epi$drugamount)]*(16/60)/epi$patientweight[(is.na(epi$epidose)) & epi$volumeoffluid==250 & epi$drugamount==4 & !is.na(epi$volumeoffluid) & !is.na(epi$drugamount)]
+
+#### ml/hr no medication table concentration (assumed concentration of 16mg/1000ml)
+epi$epidose[epi$drugname=="'Epinephrine (ml/hr)" &
+              is.na(epi$epidose)]<-epi$drugrate[epi$drugname=="'Epinephrine (ml/hr)" &
+              is.na(epi$epidose)]*(16/60)/epi$patientweight[epi$drugname=="'Epinephrine (ml/hr)" &
+              is.na(epi$epidose)]
+
+#### fixing 0 values
+epi$epidose[is.na(epi$epidose) & epi$drugrate==0]<-0
+
+#creating marker for epinephrine for remaining doses that couldn't be converted
+epi$epi<-0
+epi$epi[!is.na(epi$epidose)]<-1
+
+
+
+## dobutamine
+dob<-dobi
+dob<-left_join(dob,pt[,c("patientunitstayid","admissionweight","dischargeweight","gender")])
+dob$patientweight[is.na(dob$patientweight)]<-dob$admissionweight[is.na(dob$patientweight)] #using (1)admission weight or (2)discharge weight for patient weight (dosing weight) if patient weight missing
+dob$patientweight[is.na(dob$patientweight) & is.na(dob$admissionweight)]<-dob$dischargeweight[is.na(dob$patientweight) & is.na(dob$admissionweight)]
+dob$patientweight[(is.na(dob$patientweight)|dob$patientweight<=10) & dob$gender=="Male"]<-90 #if still missing assume, 75kg in women, 90kg in men
+dob$patientweight[(is.na(dob$patientweight)|dob$patientweight<=10) & dob$gender=="Female"]<-75 
+dob$time<-dob$infusionoffset
+
+
+### dobutamine dose conversions
+dob$drugrate<-as.numeric(dob$drugrate)
+dob<-dob[!is.na(dob$drugrate),] #removing those with drugrates that are missing after conversion to numeric
+dob$dobdose<-NA
+
+#### mcg/min to mcg/kg/min
+dob$dobdose<-0
+dob$dobdose[dob$drugrate>0]<-1
+
+
+#creating marker for dobutamine for remaining doses that couldn't be converted
+dob$dob<-0
+dob$dob[!is.na(dob$dobdose)]<-1
+
+
+## Joining pressors
+pr<-full_join(dop[,c("patientunitstayid","dopdose","dop","time")], dob[,c("patientunitstayid","dobdose","dob","time")])
+pr<-full_join(pr, nor[,c("patientunitstayid","nordose","nor","time")])
+pr<-full_join(pr, epi[,c("patientunitstayid","epidose","epi","time")])
+
+
+## maps (averaged every 4 hours to help with file size)
+nmap$time<-nmap$observationoffset
+nmap$map<-nmap$noninvasivemean
+imap$time<-imap$observationoffset
+imap$map<-imap$systemicmean
+
+map<-full_join(nmap[,c("patientunitstayid","time","map")], imap[,c("patientunitstayid","time","map")])
+map<-map[map$map>=0,]
+map$time2<-as.POSIXct(map$time*60, origin="1970-01-01 00:00.00 UTC") #aggregating mean by 4 hour time period to make easier to manipulate
+
+map1<-map %>%
+    group_by(time2 = floor_date(time2, "1 hour"), patientunitstayid) %>%
+    summarise(map = mean(map, na.rm = TRUE))
+map1$time<-as.numeric(map1$time2)/60
+
+
+## combining map and pressors
+csofa<-full_join(pr, map1[,c("patientunitstayid","map","time")])
+```
+## Nervous Sofa
+```{r nervous}
+gcs$time<-gcs$nursingchartoffset
+gcs$gcs<-as.numeric(gcs$nursingchartvalue)
+gcs<-gcs[!is.na(gcs$gcs),c("patientunitstayid","time","gcs")]
+nsofa<-gcs
+
+```
+
+## Liver Sofa
+```{r liver}
+sol$time<-sol$labresultoffset
+liv<-sol[sol$labname=="total bilirubin",]
+liv$tb<-liv$labresult
+liv$tb[is.na(liv$tb)]<-0 #NAs all have lab result texts of "<some number below 1" so set at 0
+lsofa<-liv[,c("patientunitstayid","time","tb")]
+
+```
+
+## Coag Sofa
+```{r liver}
+coag<-sol[sol$labname=="platelets x 1000",]
+coag$plt<-coag$labresult
+coag$plt[is.na(coag$plt)]<-as.numeric(coag$labresulttext[is.na(coag$plt)]) #NAs mostly have labresulttexts of the correct number so set labresulttext as labresult for those that can be converted to numeric
+coag<-coag[!coag$labresulttext=="",] #removing one with missing labresult and missing labresulttext
+coag$plt[is.na(coag$plt)]<-0 #setting remaining <n labresulttext as 0
+cosofa<-coag[,c("patientunitstayid","time","plt")]
+
+```
+## Kidney Sofa
+```{r kidney}
+kid<-sol[sol$labname=="creatinine",]
+kid$cr<-kid$labresult
+kid<-kid[!kid$labresulttext=="",] #removing one with missing labresult and missing labresulttext
+kid$cr[is.na(kid$cr)]<-0 #NAs all have lab result texts of "<some number below 1" so set at 0
+
+uop$time<-uop$intakeoutputentryoffset
+uop$uop<-uop$cellvaluenumeric
+uop1<-uop[uop$uop>0,]
+
+uop1$time2<-as.POSIXct(uop1$time*60, origin="1970-01-01 00:00.00 UTC") #aggregating sum by time period for multiple entries (could be multiple neprostomy drains for eg.)
+
+uop2<-uop1 %>%
+    group_by(time2 = floor_date(time2, "1 day"), patientunitstayid) %>%
+    summarise(uop = sum(uop, na.rm = TRUE))
+uop2$time<-as.numeric(uop2$time2)/60
+
+kid1<-full_join(kid[,c("patientunitstayid","cr","time")], uop2[,c("patientunitstayid","uop","time")])
+
+ksofa<-kid1
+
+
+```
+
+
+## Respiratory Sofa: invasive only
+```{r respiratory}
+mv1<-left_join(pt[,c("patientunitstayid","gender")], mv)
+mv2<-mv1[!is.na(mv1$segment_start),]
+mv3<-gather(mv2, mv, time, segment_start:segment_end, factor_key=FALSE)
+mv3$mv[mv3$mv=="segment_start"]<-1
+mv3$mv[mv3$mv=="segment_end"]<-0
+mv4<-aggregate(mv~patientunitstayid+time, mv3, max)
+
+pa<-sol[sol$labname=="paO2",]
+pa$pa<-pa$labresult
+pa$pa[is.na(pa$pa)]<-as.numeric(pa$labresulttext[is.na(pa$pa)]) #some NAs have correct labresulttexts so set labresulttext as labresult for those that can be converted to numberic
+pa$pa[is.na(pa$labresult) & pa$labresulttext %like% "%>%"]<-400 #NAs with labresulttexts above high assays set at 400
+pa$pa[is.na(pa$labresult) & pa$labresulttext %like% "%<%"]<-30 #NAs with labresulttexts below low assays set at 30
+pa<-pa[!is.na(pa$pa),]
+pa$time2<-as.POSIXct(pa$time*60, origin="1970-01-01 00:00.00 UTC") #aggregating mean by time period for multiple entries (so that can couple with fio2)
+pa1<-pa %>%
+    group_by(time2 = floor_date(time2, "1 hour"), patientunitstayid) %>%
+    summarise(pa = mean(pa, na.rm = TRUE))
+pa1$time<-as.numeric(pa1$time2)/60
+
+
+sao2$time<-sao2$observationoffset
+sao2<-sao2[sao2$sao2<=100,] #limiting to less than or equal to 100
+sao2$sao2[sao2$sao2>0 & sao2$sao2<1]<-sao2$sao2[sao2$sao2>0 & sao2$sao2<1]*100 #converting those listed between 0 and 1 to percent
+sao2$time2<-as.POSIXct(sao2$time*60, origin="1970-01-01 00:00.00 UTC") #aggregating mean by time period for multiple entries (so that can couple with fio2)
+sao21<-sao2 %>%
+    group_by(time2 = floor_date(time2, "1 hour"), patientunitstayid) %>%
+    summarise(sao2 = mean(sao2, na.rm = TRUE))
+sao21$time<-as.numeric(sao21$time2)/60
+
+
+
+fil<-sol[sol$labname=="FiO2",]
+fil$time<-fil$labresultoffset
+fil$fi<-fil$labresult
+fil$labresulttext<-str_remove(fil$labresulttext, "%") #NAs with correct labresulttext converted to correct form
+fil$fi[is.na(fil$fi)]<-as.numeric(fil$labresulttext[is.na(fil$fi)]) #NAs with correct labresulttext converted to correct form - step 2
+fil$fi[!is.na(fil$fi) & fil$fi>1]<-fil$fi[!is.na(fil$fi) & fil$fi>1]/100 #dividing by 100 for those units reported in %
+fil$fi[!is.na(fil$fi) & fil$fi<0]<-abs(fil$fi[!is.na(fil$fi) & fil$fi<0])/100 #taking three values that were listed as negative %s and converting to positive
+fil$fi[!is.na(fil$fi) & fil$fi>1]<-fil$fi[!is.na(fil$fi) & fil$fi>1]/100 #second dividing by 100 for those units reported in % *100
+fil<-fil[fil$fi>=0.21 & !is.na(fil$fi) & !is.na(fil$patientunitstayid),] #removing those with fio2s listed as <0.21
+
+fir$fi<-as.numeric(fir$respchartvalue)
+fir<-fir[fir$fi!=0,] #removing 0s to make cleaning easier
+fir$fi[fir$fi<0 & !is.na(fir$fi)]<-abs(fir$fi[fir$fi<0 & !is.na(fir$fi)]) #converting negatives to positive
+fir$fi[fir$fi>1 & !is.na(fir$fi)]<-fir$fi[fir$fi>1  & !is.na(fir$fi)]/100 #converting fio2 % to fio2 fraction
+fir$fi[fir$fi>1 & !is.na(fir$fi)]<-fir$fi[fir$fi>1  & !is.na(fir$fi)]/100 #converting those units reported in % *100
+fir<-fir[fir$fi>=0.21 & !is.na(fir$patientunitstayid),] #removing those with fio2s listed as <0.21
+fir<-fir[fir$fi<=1,] #removing two values that are implausibly high
+fir$time<-fir$respchartoffset
+
+fin$time<-fin$nursingchartoffset
+fin$fi<-fin$fio2
+fin<-fin[!is.na(fin$fi),]
+
+
+fi<-full_join(fil[,c("patientunitstayid","time","fi")],fir[,c("patientunitstayid","time","fi")]) #joining three fio2 sources
+fi<-full_join(fi, fin[,c("patientunitstayid","time","fi")])
+
+fi$time2<-as.POSIXct(fi$time*60, origin="1970-01-01 00:00.00 UTC") #aggregating mean by time period for multiple entries (so that can couple with fio2)
+fi1<-fi %>%
+    group_by(time2 = floor_date(time2, "1 hour"), patientunitstayid) %>%
+    summarise(fi = mean(fi, na.rm = TRUE))
+fi1$time<-as.numeric(fi1$time2)/60
+
+resp<-full_join(mv4[,c("patientunitstayid","time","mv")], pa1[,c("patientunitstayid","time","pa")])
+resp1<-full_join(resp, fi[,c("patientunitstayid","time","fi")])
+resp1<-full_join(resp1, sao21[,c("patientunitstayid","time","sao2")])
+
+
+rsofa<-resp1
+```
+
+
+## Combining scores
+```{r combining}
+sofa<-full_join(csofa, nsofa)
+sofa<-full_join(sofa, lsofa)
+sofa<-full_join(sofa, cosofa)
+sofa<-full_join(sofa, ksofa)
+sofa<-full_join(sofa, rsofa)
+
+#creating second sofa version before imputation
+sofa1<-sofa
+
+#locf
+sofa1<-sofa1 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(nordose=na.locf(nordose, na.rm=FALSE))
+sofa1<-sofa1 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(epidose=na.locf(epidose, na.rm=FALSE))
+sofa1<-sofa1 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(dopdose=na.locf(dopdose, na.rm=FALSE))
+sofa1<-sofa1 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(dob=na.locf(dob, na.rm=FALSE))
+sofa1<-sofa1 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(map=na.locf(map, na.rm=FALSE))
+sofa1<-sofa1 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(gcs=na.locf(gcs, na.rm=FALSE))
+sofa1<-sofa1 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(tb=na.locf(tb, na.rm=FALSE))
+sofa1<-sofa1 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(plt=na.locf(plt, na.rm=FALSE))
+sofa1<-sofa1 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(cr=na.locf(cr, na.rm=FALSE))
+sofa1<-sofa1 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(uop=na.locf(uop, na.rm=FALSE))
+sofa1<-sofa1 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(mv=na.locf(mv, na.rm=FALSE))
+sofa1<-sofa1 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(pa=na.locf(pa, na.rm=FALSE))
+sofa1<-sofa1 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(sao2=na.locf(sao2, na.rm=FALSE))
+sofa1<-sofa1 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(fi=na.locf(fi, na.rm=FALSE))
+
+
+# calculating scores (missing data is assumed lowest category)
+## cardiovascular sofa
+sofa1$cardiovascular_sofa<-0
+sofa1$cardiovascular_sofa[((is.na(sofa1$nordose)|sofa1$nordose==0) & 
+                            (is.na(sofa1$epidose)|sofa1$epidose==0) &
+                            (is.na(sofa1$dopdose)|sofa1$dopdose==0) &
+                            (is.na(sofa1$dob)|sofa1$dob==0)) &
+                            !is.na(sofa1$map) & sofa1$map<70]<-1
+sofa1$cardiovascular_sofa[(!is.na(sofa1$dopdose)|!is.na(sofa1$dob)) &
+                            (sofa1$dopdose<=5 | sofa1$dob==1)]<-2
+sofa1$cardiovascular_sofa[(!is.na(sofa1$dopdose)|!is.na(sofa1$nordose)|
+                             !is.na(sofa1$epidose)) &
+                        (sofa1$nordose<=0.1|sofa1$epidose<=0.1|sofa1$dopdose>5)]<-3
+sofa1$cardiovascular_sofa[(!is.na(sofa1$dopdose)|!is.na(sofa1$nordose)|
+                             !is.na(sofa1$epidose)) &
+                        (sofa1$nordose>0.1|sofa1$epidose>0.1|sofa1$dopdose>15)]<-4
+
+## nervous sofa
+sofa1$nervous_sofa<-0
+sofa1$nervous_sofa[!is.na(sofa1$gcs) & sofa1$gcs<=14]<-1
+sofa1$nervous_sofa[!is.na(sofa1$gcs) & sofa1$gcs<=12]<-2
+sofa1$nervous_sofa[!is.na(sofa1$gcs) & sofa1$gcs<=9]<-3
+sofa1$nervous_sofa[!is.na(sofa1$gcs) & sofa1$gcs<6]<-4
+
+## liver sofa
+sofa1$liver_sofa<-0
+sofa1$liver_sofa[!is.na(sofa1$tb) & sofa1$tb>=1.2]<-1
+sofa1$liver_sofa[!is.na(sofa1$tb) & sofa1$tb>=2.0]<-2
+sofa1$liver_sofa[!is.na(sofa1$tb) & sofa1$tb>=6.0]<-3
+sofa1$liver_sofa[!is.na(sofa1$tb) & sofa1$tb>12.0]<-4
+
+## coagulation sofa
+sofa1$coagulation_sofa<-0
+sofa1$coagulation_sofa[!is.na(sofa1$plt) & sofa1$plt<150]<-1
+sofa1$coagulation_sofa[!is.na(sofa1$plt) & sofa1$plt<100]<-2
+sofa1$coagulation_sofa[!is.na(sofa1$plt) & sofa1$plt<50]<-3
+sofa1$coagulation_sofa[!is.na(sofa1$plt) & sofa1$plt<20]<-4
+
+
+## kidney sofa
+sofa1$kidney_sofa<-0
+sofa1$kidney_sofa[!is.na(sofa1$cr) & sofa1$cr>=1.2]<-1
+sofa1$kidney_sofa[!is.na(sofa1$cr) & sofa1$cr>=2]<-2
+sofa1$kidney_sofa[(!is.na(sofa1$cr) & sofa1$cr>=3.5)
+                  | (!is.na(sofa1$uop) & sofa1$uop<500)]<-3
+sofa1$kidney_sofa[(!is.na(sofa1$cr) & sofa1$cr>5) |
+                    (!is.na(sofa1$uop) & sofa1$uop<200)]<-4
+
+## respiratory sofa: includes invasive and non-invasive mechanical ventilation
+sofa1$respiratory_sofa<-0
+sofa1$respiratory_sofa[!is.na(sofa1$pa) & !is.na(sofa1$fi) & sofa1$pa/sofa1$fi<400]<-1
+sofa1$respiratory_sofa[!is.na(sofa1$pa) & !is.na(sofa1$fi) & sofa1$pa/sofa1$fi<300]<-2
+sofa1$respiratory_sofa[!is.na(sofa1$pa) & !is.na(sofa1$fi) & !is.na(sofa1$mv) & sofa1$pa/sofa1$fi<200 & sofa1$mv==1]<-3
+sofa1$respiratory_sofa[!is.na(sofa1$pa) & !is.na(sofa1$fi) & !is.na(sofa1$mv) & sofa1$pa/sofa1$fi<100 & sofa1$mv==1]<-4
+
+
+## total sofa at that hour
+sofa1$total_sofa<-sofa1$cardiovascular_sofa+
+  sofa1$nervous_sofa+
+  sofa1$liver_sofa+
+  sofa1$coagulation_sofa+
+  sofa1$kidney_sofa+
+  sofa1$respiratory_sofa
+
+#total sofa last 24 hours
+sofa1$time2<-ceiling_date(as_datetime(sofa1$time*60, origin="1970-01-01 00:00.00 UTC"), "1 hour")
+
+cardiovascular_sofa_worst_hour<-sofa1 %>%
+    group_by(time2, patientunitstayid) %>%
+    summarise(cardiovascular_sofa_worst_hour = max(cardiovascular_sofa, na.rm = TRUE))
+
+nervous_sofa_worst_hour<-sofa1 %>%
+    group_by(time2, patientunitstayid) %>%
+    summarise(nervous_sofa_worst_hour = max(nervous_sofa, na.rm = TRUE))
+
+liver_sofa_worst_hour<-sofa1 %>%
+    group_by(time2, patientunitstayid) %>%
+    summarise(liver_sofa_worst_hour = max(liver_sofa, na.rm = TRUE))
+
+coagulation_sofa_worst_hour<-sofa1 %>%
+    group_by(time2, patientunitstayid) %>%
+    summarise(coagulation_sofa_worst_hour = max(coagulation_sofa, na.rm = TRUE))
+
+kidney_sofa_worst_hour<-sofa1 %>%
+    group_by(time2, patientunitstayid) %>%
+    summarise(kidney_sofa_worst_hour = max(kidney_sofa, na.rm = TRUE))
+
+respiratory_sofa_worst_hour<-sofa1 %>%
+    group_by(time2, patientunitstayid) %>%
+    summarise(respiratory_sofa_worst_hour = max(respiratory_sofa, na.rm = TRUE))
+
+sofa2<-full_join(cardiovascular_sofa_worst_hour, nervous_sofa_worst_hour)
+sofa2<-full_join(sofa2, liver_sofa_worst_hour)
+sofa2<-full_join(sofa2, coagulation_sofa_worst_hour)
+sofa2<-full_join(sofa2, kidney_sofa_worst_hour)
+sofa2<-full_join(sofa2, respiratory_sofa_worst_hour)
+sofa2$time<-as.numeric(sofa2$time2)/60
+
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagtime1hr = dplyr::lag(time, n = 1, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagtime2hr = dplyr::lag(time, n = 2, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagtime3hr = dplyr::lag(time, n = 3, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagtime4hr = dplyr::lag(time, n = 4, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagtime5hr = dplyr::lag(time, n = 5, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagtime6hr = dplyr::lag(time, n = 6, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagtime7hr = dplyr::lag(time, n = 7, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagtime8hr = dplyr::lag(time, n = 8, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagtime9hr = dplyr::lag(time, n = 9, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagtime10hr = dplyr::lag(time, n = 10, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagtime11hr = dplyr::lag(time, n = 11, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagtime12hr = dplyr::lag(time, n = 12, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagtime13hr = dplyr::lag(time, n = 13, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagtime14hr = dplyr::lag(time, n = 14, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagtime15hr = dplyr::lag(time, n = 15, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagtime16hr = dplyr::lag(time, n = 16, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagtime17hr = dplyr::lag(time, n = 17, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagtime18hr = dplyr::lag(time, n = 18, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagtime19hr = dplyr::lag(time, n = 19, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagtime20hr = dplyr::lag(time, n = 20, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagtime21hr = dplyr::lag(time, n = 21, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagtime22hr = dplyr::lag(time, n = 22, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagtime23hr = dplyr::lag(time, n = 23, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagtime24hr = dplyr::lag(time, n = 24, default = NA))
+
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagcardiovascular_sofa_worst_hour1hr = dplyr::lag(cardiovascular_sofa_worst_hour, n = 1, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagcardiovascular_sofa_worst_hour2hr = dplyr::lag(cardiovascular_sofa_worst_hour, n = 2, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagcardiovascular_sofa_worst_hour3hr = dplyr::lag(cardiovascular_sofa_worst_hour, n = 3, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagcardiovascular_sofa_worst_hour4hr = dplyr::lag(cardiovascular_sofa_worst_hour, n = 4, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagcardiovascular_sofa_worst_hour5hr = dplyr::lag(cardiovascular_sofa_worst_hour, n = 5, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagcardiovascular_sofa_worst_hour6hr = dplyr::lag(cardiovascular_sofa_worst_hour, n = 6, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagcardiovascular_sofa_worst_hour7hr = dplyr::lag(cardiovascular_sofa_worst_hour, n = 7, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagcardiovascular_sofa_worst_hour8hr = dplyr::lag(cardiovascular_sofa_worst_hour, n = 8, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagcardiovascular_sofa_worst_hour9hr = dplyr::lag(cardiovascular_sofa_worst_hour, n = 9, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagcardiovascular_sofa_worst_hour10hr = dplyr::lag(cardiovascular_sofa_worst_hour, n = 10, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagcardiovascular_sofa_worst_hour11hr = dplyr::lag(cardiovascular_sofa_worst_hour, n = 11, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagcardiovascular_sofa_worst_hour12hr = dplyr::lag(cardiovascular_sofa_worst_hour, n = 12, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagcardiovascular_sofa_worst_hour13hr = dplyr::lag(cardiovascular_sofa_worst_hour, n = 13, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagcardiovascular_sofa_worst_hour14hr = dplyr::lag(cardiovascular_sofa_worst_hour, n = 14, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagcardiovascular_sofa_worst_hour15hr = dplyr::lag(cardiovascular_sofa_worst_hour, n = 15, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagcardiovascular_sofa_worst_hour16hr = dplyr::lag(cardiovascular_sofa_worst_hour, n = 16, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagcardiovascular_sofa_worst_hour17hr = dplyr::lag(cardiovascular_sofa_worst_hour, n = 17, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagcardiovascular_sofa_worst_hour18hr = dplyr::lag(cardiovascular_sofa_worst_hour, n = 18, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagcardiovascular_sofa_worst_hour19hr = dplyr::lag(cardiovascular_sofa_worst_hour, n = 19, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagcardiovascular_sofa_worst_hour20hr = dplyr::lag(cardiovascular_sofa_worst_hour, n = 20, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagcardiovascular_sofa_worst_hour21hr = dplyr::lag(cardiovascular_sofa_worst_hour, n = 21, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagcardiovascular_sofa_worst_hour22hr = dplyr::lag(cardiovascular_sofa_worst_hour, n = 22, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagcardiovascular_sofa_worst_hour23hr = dplyr::lag(cardiovascular_sofa_worst_hour, n = 23, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagcardiovascular_sofa_worst_hour24hr = dplyr::lag(cardiovascular_sofa_worst_hour, n = 24, default = NA))
+
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagnervous_sofa_worst_hour1hr = dplyr::lag(nervous_sofa_worst_hour, n = 1, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagnervous_sofa_worst_hour2hr = dplyr::lag(nervous_sofa_worst_hour, n = 2, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagnervous_sofa_worst_hour3hr = dplyr::lag(nervous_sofa_worst_hour, n = 3, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagnervous_sofa_worst_hour4hr = dplyr::lag(nervous_sofa_worst_hour, n = 4, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagnervous_sofa_worst_hour5hr = dplyr::lag(nervous_sofa_worst_hour, n = 5, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagnervous_sofa_worst_hour6hr = dplyr::lag(nervous_sofa_worst_hour, n = 6, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagnervous_sofa_worst_hour7hr = dplyr::lag(nervous_sofa_worst_hour, n = 7, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagnervous_sofa_worst_hour8hr = dplyr::lag(nervous_sofa_worst_hour, n = 8, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagnervous_sofa_worst_hour9hr = dplyr::lag(nervous_sofa_worst_hour, n = 9, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagnervous_sofa_worst_hour10hr = dplyr::lag(nervous_sofa_worst_hour, n = 10, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagnervous_sofa_worst_hour11hr = dplyr::lag(nervous_sofa_worst_hour, n = 11, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagnervous_sofa_worst_hour12hr = dplyr::lag(nervous_sofa_worst_hour, n = 12, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagnervous_sofa_worst_hour13hr = dplyr::lag(nervous_sofa_worst_hour, n = 13, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagnervous_sofa_worst_hour14hr = dplyr::lag(nervous_sofa_worst_hour, n = 14, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagnervous_sofa_worst_hour15hr = dplyr::lag(nervous_sofa_worst_hour, n = 15, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagnervous_sofa_worst_hour16hr = dplyr::lag(nervous_sofa_worst_hour, n = 16, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagnervous_sofa_worst_hour17hr = dplyr::lag(nervous_sofa_worst_hour, n = 17, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagnervous_sofa_worst_hour18hr = dplyr::lag(nervous_sofa_worst_hour, n = 18, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagnervous_sofa_worst_hour19hr = dplyr::lag(nervous_sofa_worst_hour, n = 19, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagnervous_sofa_worst_hour20hr = dplyr::lag(nervous_sofa_worst_hour, n = 20, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagnervous_sofa_worst_hour21hr = dplyr::lag(nervous_sofa_worst_hour, n = 21, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagnervous_sofa_worst_hour22hr = dplyr::lag(nervous_sofa_worst_hour, n = 22, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagnervous_sofa_worst_hour23hr = dplyr::lag(nervous_sofa_worst_hour, n = 23, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagnervous_sofa_worst_hour24hr = dplyr::lag(nervous_sofa_worst_hour, n = 24, default = NA))
+
+
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagliver_sofa_worst_hour1hr = dplyr::lag(liver_sofa_worst_hour, n = 1, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagliver_sofa_worst_hour2hr = dplyr::lag(liver_sofa_worst_hour, n = 2, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagliver_sofa_worst_hour3hr = dplyr::lag(liver_sofa_worst_hour, n = 3, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagliver_sofa_worst_hour4hr = dplyr::lag(liver_sofa_worst_hour, n = 4, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagliver_sofa_worst_hour5hr = dplyr::lag(liver_sofa_worst_hour, n = 5, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagliver_sofa_worst_hour6hr = dplyr::lag(liver_sofa_worst_hour, n = 6, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagliver_sofa_worst_hour7hr = dplyr::lag(liver_sofa_worst_hour, n = 7, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagliver_sofa_worst_hour8hr = dplyr::lag(liver_sofa_worst_hour, n = 8, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagliver_sofa_worst_hour9hr = dplyr::lag(liver_sofa_worst_hour, n = 9, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagliver_sofa_worst_hour10hr = dplyr::lag(liver_sofa_worst_hour, n = 10, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagliver_sofa_worst_hour11hr = dplyr::lag(liver_sofa_worst_hour, n = 11, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagliver_sofa_worst_hour12hr = dplyr::lag(liver_sofa_worst_hour, n = 12, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagliver_sofa_worst_hour13hr = dplyr::lag(liver_sofa_worst_hour, n = 13, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagliver_sofa_worst_hour14hr = dplyr::lag(liver_sofa_worst_hour, n = 14, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagliver_sofa_worst_hour15hr = dplyr::lag(liver_sofa_worst_hour, n = 15, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagliver_sofa_worst_hour16hr = dplyr::lag(liver_sofa_worst_hour, n = 16, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagliver_sofa_worst_hour17hr = dplyr::lag(liver_sofa_worst_hour, n = 17, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagliver_sofa_worst_hour18hr = dplyr::lag(liver_sofa_worst_hour, n = 18, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagliver_sofa_worst_hour19hr = dplyr::lag(liver_sofa_worst_hour, n = 19, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagliver_sofa_worst_hour20hr = dplyr::lag(liver_sofa_worst_hour, n = 20, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagliver_sofa_worst_hour21hr = dplyr::lag(liver_sofa_worst_hour, n = 21, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagliver_sofa_worst_hour22hr = dplyr::lag(liver_sofa_worst_hour, n = 22, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagliver_sofa_worst_hour23hr = dplyr::lag(liver_sofa_worst_hour, n = 23, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagliver_sofa_worst_hour24hr = dplyr::lag(liver_sofa_worst_hour, n = 24, default = NA))
+
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagcoagulation_sofa_worst_hour1hr = dplyr::lag(coagulation_sofa_worst_hour, n = 1, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagcoagulation_sofa_worst_hour2hr = dplyr::lag(coagulation_sofa_worst_hour, n = 2, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagcoagulation_sofa_worst_hour3hr = dplyr::lag(coagulation_sofa_worst_hour, n = 3, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagcoagulation_sofa_worst_hour4hr = dplyr::lag(coagulation_sofa_worst_hour, n = 4, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagcoagulation_sofa_worst_hour5hr = dplyr::lag(coagulation_sofa_worst_hour, n = 5, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagcoagulation_sofa_worst_hour6hr = dplyr::lag(coagulation_sofa_worst_hour, n = 6, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagcoagulation_sofa_worst_hour7hr = dplyr::lag(coagulation_sofa_worst_hour, n = 7, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagcoagulation_sofa_worst_hour8hr = dplyr::lag(coagulation_sofa_worst_hour, n = 8, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagcoagulation_sofa_worst_hour9hr = dplyr::lag(coagulation_sofa_worst_hour, n = 9, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagcoagulation_sofa_worst_hour10hr = dplyr::lag(coagulation_sofa_worst_hour, n = 10, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagcoagulation_sofa_worst_hour11hr = dplyr::lag(coagulation_sofa_worst_hour, n = 11, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagcoagulation_sofa_worst_hour12hr = dplyr::lag(coagulation_sofa_worst_hour, n = 12, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagcoagulation_sofa_worst_hour13hr = dplyr::lag(coagulation_sofa_worst_hour, n = 13, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagcoagulation_sofa_worst_hour14hr = dplyr::lag(coagulation_sofa_worst_hour, n = 14, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagcoagulation_sofa_worst_hour15hr = dplyr::lag(coagulation_sofa_worst_hour, n = 15, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagcoagulation_sofa_worst_hour16hr = dplyr::lag(coagulation_sofa_worst_hour, n = 16, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagcoagulation_sofa_worst_hour17hr = dplyr::lag(coagulation_sofa_worst_hour, n = 17, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagcoagulation_sofa_worst_hour18hr = dplyr::lag(coagulation_sofa_worst_hour, n = 18, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagcoagulation_sofa_worst_hour19hr = dplyr::lag(coagulation_sofa_worst_hour, n = 19, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagcoagulation_sofa_worst_hour20hr = dplyr::lag(coagulation_sofa_worst_hour, n = 20, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagcoagulation_sofa_worst_hour21hr = dplyr::lag(coagulation_sofa_worst_hour, n = 21, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagcoagulation_sofa_worst_hour22hr = dplyr::lag(coagulation_sofa_worst_hour, n = 22, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagcoagulation_sofa_worst_hour23hr = dplyr::lag(coagulation_sofa_worst_hour, n = 23, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagcoagulation_sofa_worst_hour24hr = dplyr::lag(coagulation_sofa_worst_hour, n = 24, default = NA))
+
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagkidney_sofa_worst_hour1hr = dplyr::lag(kidney_sofa_worst_hour, n = 1, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagkidney_sofa_worst_hour2hr = dplyr::lag(kidney_sofa_worst_hour, n = 2, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagkidney_sofa_worst_hour3hr = dplyr::lag(kidney_sofa_worst_hour, n = 3, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagkidney_sofa_worst_hour4hr = dplyr::lag(kidney_sofa_worst_hour, n = 4, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagkidney_sofa_worst_hour5hr = dplyr::lag(kidney_sofa_worst_hour, n = 5, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagkidney_sofa_worst_hour6hr = dplyr::lag(kidney_sofa_worst_hour, n = 6, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagkidney_sofa_worst_hour7hr = dplyr::lag(kidney_sofa_worst_hour, n = 7, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagkidney_sofa_worst_hour8hr = dplyr::lag(kidney_sofa_worst_hour, n = 8, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagkidney_sofa_worst_hour9hr = dplyr::lag(kidney_sofa_worst_hour, n = 9, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagkidney_sofa_worst_hour10hr = dplyr::lag(kidney_sofa_worst_hour, n = 10, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagkidney_sofa_worst_hour11hr = dplyr::lag(kidney_sofa_worst_hour, n = 11, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagkidney_sofa_worst_hour12hr = dplyr::lag(kidney_sofa_worst_hour, n = 12, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagkidney_sofa_worst_hour13hr = dplyr::lag(kidney_sofa_worst_hour, n = 13, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagkidney_sofa_worst_hour14hr = dplyr::lag(kidney_sofa_worst_hour, n = 14, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagkidney_sofa_worst_hour15hr = dplyr::lag(kidney_sofa_worst_hour, n = 15, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagkidney_sofa_worst_hour16hr = dplyr::lag(kidney_sofa_worst_hour, n = 16, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagkidney_sofa_worst_hour17hr = dplyr::lag(kidney_sofa_worst_hour, n = 17, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagkidney_sofa_worst_hour18hr = dplyr::lag(kidney_sofa_worst_hour, n = 18, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagkidney_sofa_worst_hour19hr = dplyr::lag(kidney_sofa_worst_hour, n = 19, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagkidney_sofa_worst_hour20hr = dplyr::lag(kidney_sofa_worst_hour, n = 20, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagkidney_sofa_worst_hour21hr = dplyr::lag(kidney_sofa_worst_hour, n = 21, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagkidney_sofa_worst_hour22hr = dplyr::lag(kidney_sofa_worst_hour, n = 22, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagkidney_sofa_worst_hour23hr = dplyr::lag(kidney_sofa_worst_hour, n = 23, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagkidney_sofa_worst_hour24hr = dplyr::lag(kidney_sofa_worst_hour, n = 24, default = NA))
+
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagrespiratory_sofa_worst_hour1hr = dplyr::lag(respiratory_sofa_worst_hour, n = 1, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagrespiratory_sofa_worst_hour2hr = dplyr::lag(respiratory_sofa_worst_hour, n = 2, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagrespiratory_sofa_worst_hour3hr = dplyr::lag(respiratory_sofa_worst_hour, n = 3, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagrespiratory_sofa_worst_hour4hr = dplyr::lag(respiratory_sofa_worst_hour, n = 4, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagrespiratory_sofa_worst_hour5hr = dplyr::lag(respiratory_sofa_worst_hour, n = 5, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagrespiratory_sofa_worst_hour6hr = dplyr::lag(respiratory_sofa_worst_hour, n = 6, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagrespiratory_sofa_worst_hour7hr = dplyr::lag(respiratory_sofa_worst_hour, n = 7, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagrespiratory_sofa_worst_hour8hr = dplyr::lag(respiratory_sofa_worst_hour, n = 8, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagrespiratory_sofa_worst_hour9hr = dplyr::lag(respiratory_sofa_worst_hour, n = 9, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagrespiratory_sofa_worst_hour10hr = dplyr::lag(respiratory_sofa_worst_hour, n = 10, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagrespiratory_sofa_worst_hour11hr = dplyr::lag(respiratory_sofa_worst_hour, n = 11, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagrespiratory_sofa_worst_hour12hr = dplyr::lag(respiratory_sofa_worst_hour, n = 12, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagrespiratory_sofa_worst_hour13hr = dplyr::lag(respiratory_sofa_worst_hour, n = 13, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagrespiratory_sofa_worst_hour14hr = dplyr::lag(respiratory_sofa_worst_hour, n = 14, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagrespiratory_sofa_worst_hour15hr = dplyr::lag(respiratory_sofa_worst_hour, n = 15, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagrespiratory_sofa_worst_hour16hr = dplyr::lag(respiratory_sofa_worst_hour, n = 16, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagrespiratory_sofa_worst_hour17hr = dplyr::lag(respiratory_sofa_worst_hour, n = 17, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagrespiratory_sofa_worst_hour18hr = dplyr::lag(respiratory_sofa_worst_hour, n = 18, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagrespiratory_sofa_worst_hour19hr = dplyr::lag(respiratory_sofa_worst_hour, n = 19, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagrespiratory_sofa_worst_hour20hr = dplyr::lag(respiratory_sofa_worst_hour, n = 20, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagrespiratory_sofa_worst_hour21hr = dplyr::lag(respiratory_sofa_worst_hour, n = 21, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagrespiratory_sofa_worst_hour22hr = dplyr::lag(respiratory_sofa_worst_hour, n = 22, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagrespiratory_sofa_worst_hour23hr = dplyr::lag(respiratory_sofa_worst_hour, n = 23, default = NA))
+sofa2<-sofa2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(lagrespiratory_sofa_worst_hour24hr = dplyr::lag(respiratory_sofa_worst_hour, n = 24, default = NA))
+
+sofa3<-sofa2 #duplicating for further wrangling
+
+#removing time values and sofa values not within 24 hours
+sofa3$lagtime1hr[!is.na(sofa3$lagtime1hr) & sofa3$lagtime1hr+1440<sofa3$time]<-NA
+sofa3$lagtime2hr[!is.na(sofa3$lagtime2hr) & sofa3$lagtime2hr+1440<sofa3$time]<-NA
+sofa3$lagtime3hr[!is.na(sofa3$lagtime3hr) & sofa3$lagtime3hr+1440<sofa3$time]<-NA
+sofa3$lagtime4hr[!is.na(sofa3$lagtime4hr) & sofa3$lagtime4hr+1440<sofa3$time]<-NA
+sofa3$lagtime5hr[!is.na(sofa3$lagtime5hr) & sofa3$lagtime5hr+1440<sofa3$time]<-NA
+sofa3$lagtime6hr[!is.na(sofa3$lagtime6hr) & sofa3$lagtime6hr+1440<sofa3$time]<-NA
+sofa3$lagtime7hr[!is.na(sofa3$lagtime7hr) & sofa3$lagtime7hr+1440<sofa3$time]<-NA
+sofa3$lagtime8hr[!is.na(sofa3$lagtime8hr) & sofa3$lagtime8hr+1440<sofa3$time]<-NA
+sofa3$lagtime9hr[!is.na(sofa3$lagtime9hr) & sofa3$lagtime9hr+1440<sofa3$time]<-NA
+sofa3$lagtime10hr[!is.na(sofa3$lagtime10hr) & sofa3$lagtime10hr+1440<sofa3$time]<-NA
+sofa3$lagtime11hr[!is.na(sofa3$lagtime11hr) & sofa3$lagtime11hr+1440<sofa3$time]<-NA
+sofa3$lagtime12hr[!is.na(sofa3$lagtime12hr) & sofa3$lagtime12hr+1440<sofa3$time]<-NA
+sofa3$lagtime13hr[!is.na(sofa3$lagtime13hr) & sofa3$lagtime13hr+1440<sofa3$time]<-NA
+sofa3$lagtime14hr[!is.na(sofa3$lagtime14hr) & sofa3$lagtime14hr+1440<sofa3$time]<-NA
+sofa3$lagtime15hr[!is.na(sofa3$lagtime15hr) & sofa3$lagtime15hr+1440<sofa3$time]<-NA
+sofa3$lagtime16hr[!is.na(sofa3$lagtime16hr) & sofa3$lagtime16hr+1440<sofa3$time]<-NA
+sofa3$lagtime17hr[!is.na(sofa3$lagtime17hr) & sofa3$lagtime17hr+1440<sofa3$time]<-NA
+sofa3$lagtime18hr[!is.na(sofa3$lagtime18hr) & sofa3$lagtime18hr+1440<sofa3$time]<-NA
+sofa3$lagtime19hr[!is.na(sofa3$lagtime19hr) & sofa3$lagtime19hr+1440<sofa3$time]<-NA
+sofa3$lagtime20hr[!is.na(sofa3$lagtime20hr) & sofa3$lagtime20hr+1440<sofa3$time]<-NA
+sofa3$lagtime21hr[!is.na(sofa3$lagtime21hr) & sofa3$lagtime21hr+1440<sofa3$time]<-NA
+sofa3$lagtime22hr[!is.na(sofa3$lagtime22hr) & sofa3$lagtime22hr+1440<sofa3$time]<-NA
+sofa3$lagtime23hr[!is.na(sofa3$lagtime23hr) & sofa3$lagtime23hr+1440<sofa3$time]<-NA
+sofa3$lagtime24hr[!is.na(sofa3$lagtime24hr) & sofa3$lagtime24hr+1440<sofa3$time]<-NA
+
+sofa3$lagcardiovascular_sofa_worst_hour1hr[is.na(sofa3$lagtime1hr)]<-0
+sofa3$lagcardiovascular_sofa_worst_hour2hr[is.na(sofa3$lagtime2hr)]<-0
+sofa3$lagcardiovascular_sofa_worst_hour3hr[is.na(sofa3$lagtime3hr)]<-0
+sofa3$lagcardiovascular_sofa_worst_hour4hr[is.na(sofa3$lagtime4hr)]<-0
+sofa3$lagcardiovascular_sofa_worst_hour5hr[is.na(sofa3$lagtime5hr)]<-0
+sofa3$lagcardiovascular_sofa_worst_hour6hr[is.na(sofa3$lagtime6hr)]<-0
+sofa3$lagcardiovascular_sofa_worst_hour7hr[is.na(sofa3$lagtime7hr)]<-0
+sofa3$lagcardiovascular_sofa_worst_hour8hr[is.na(sofa3$lagtime8hr)]<-0
+sofa3$lagcardiovascular_sofa_worst_hour9hr[is.na(sofa3$lagtime9hr)]<-0
+sofa3$lagcardiovascular_sofa_worst_hour10hr[is.na(sofa3$lagtime10hr)]<-0
+sofa3$lagcardiovascular_sofa_worst_hour11hr[is.na(sofa3$lagtime11hr)]<-0
+sofa3$lagcardiovascular_sofa_worst_hour12hr[is.na(sofa3$lagtime12hr)]<-0
+sofa3$lagcardiovascular_sofa_worst_hour13hr[is.na(sofa3$lagtime13hr)]<-0
+sofa3$lagcardiovascular_sofa_worst_hour14hr[is.na(sofa3$lagtime14hr)]<-0
+sofa3$lagcardiovascular_sofa_worst_hour15hr[is.na(sofa3$lagtime15hr)]<-0
+sofa3$lagcardiovascular_sofa_worst_hour16hr[is.na(sofa3$lagtime16hr)]<-0
+sofa3$lagcardiovascular_sofa_worst_hour17hr[is.na(sofa3$lagtime17hr)]<-0
+sofa3$lagcardiovascular_sofa_worst_hour18hr[is.na(sofa3$lagtime18hr)]<-0
+sofa3$lagcardiovascular_sofa_worst_hour19hr[is.na(sofa3$lagtime19hr)]<-0
+sofa3$lagcardiovascular_sofa_worst_hour20hr[is.na(sofa3$lagtime20hr)]<-0
+sofa3$lagcardiovascular_sofa_worst_hour21hr[is.na(sofa3$lagtime21hr)]<-0
+sofa3$lagcardiovascular_sofa_worst_hour22hr[is.na(sofa3$lagtime22hr)]<-0
+sofa3$lagcardiovascular_sofa_worst_hour23hr[is.na(sofa3$lagtime23hr)]<-0
+sofa3$lagcardiovascular_sofa_worst_hour24hr[is.na(sofa3$lagtime24hr)]<-0
+
+sofa3$lagnervous_sofa_worst_hour1hr[is.na(sofa3$lagtime1hr)]<-0
+sofa3$lagnervous_sofa_worst_hour2hr[is.na(sofa3$lagtime2hr)]<-0
+sofa3$lagnervous_sofa_worst_hour3hr[is.na(sofa3$lagtime3hr)]<-0
+sofa3$lagnervous_sofa_worst_hour4hr[is.na(sofa3$lagtime4hr)]<-0
+sofa3$lagnervous_sofa_worst_hour5hr[is.na(sofa3$lagtime5hr)]<-0
+sofa3$lagnervous_sofa_worst_hour6hr[is.na(sofa3$lagtime6hr)]<-0
+sofa3$lagnervous_sofa_worst_hour7hr[is.na(sofa3$lagtime7hr)]<-0
+sofa3$lagnervous_sofa_worst_hour8hr[is.na(sofa3$lagtime8hr)]<-0
+sofa3$lagnervous_sofa_worst_hour9hr[is.na(sofa3$lagtime9hr)]<-0
+sofa3$lagnervous_sofa_worst_hour10hr[is.na(sofa3$lagtime10hr)]<-0
+sofa3$lagnervous_sofa_worst_hour11hr[is.na(sofa3$lagtime11hr)]<-0
+sofa3$lagnervous_sofa_worst_hour12hr[is.na(sofa3$lagtime12hr)]<-0
+sofa3$lagnervous_sofa_worst_hour13hr[is.na(sofa3$lagtime13hr)]<-0
+sofa3$lagnervous_sofa_worst_hour14hr[is.na(sofa3$lagtime14hr)]<-0
+sofa3$lagnervous_sofa_worst_hour15hr[is.na(sofa3$lagtime15hr)]<-0
+sofa3$lagnervous_sofa_worst_hour16hr[is.na(sofa3$lagtime16hr)]<-0
+sofa3$lagnervous_sofa_worst_hour17hr[is.na(sofa3$lagtime17hr)]<-0
+sofa3$lagnervous_sofa_worst_hour18hr[is.na(sofa3$lagtime18hr)]<-0
+sofa3$lagnervous_sofa_worst_hour19hr[is.na(sofa3$lagtime19hr)]<-0
+sofa3$lagnervous_sofa_worst_hour20hr[is.na(sofa3$lagtime20hr)]<-0
+sofa3$lagnervous_sofa_worst_hour21hr[is.na(sofa3$lagtime21hr)]<-0
+sofa3$lagnervous_sofa_worst_hour22hr[is.na(sofa3$lagtime22hr)]<-0
+sofa3$lagnervous_sofa_worst_hour23hr[is.na(sofa3$lagtime23hr)]<-0
+sofa3$lagnervous_sofa_worst_hour24hr[is.na(sofa3$lagtime24hr)]<-0
+
+sofa3$lagliver_sofa_worst_hour1hr[is.na(sofa3$lagtime1hr)]<-0
+sofa3$lagliver_sofa_worst_hour2hr[is.na(sofa3$lagtime2hr)]<-0
+sofa3$lagliver_sofa_worst_hour3hr[is.na(sofa3$lagtime3hr)]<-0
+sofa3$lagliver_sofa_worst_hour4hr[is.na(sofa3$lagtime4hr)]<-0
+sofa3$lagliver_sofa_worst_hour5hr[is.na(sofa3$lagtime5hr)]<-0
+sofa3$lagliver_sofa_worst_hour6hr[is.na(sofa3$lagtime6hr)]<-0
+sofa3$lagliver_sofa_worst_hour7hr[is.na(sofa3$lagtime7hr)]<-0
+sofa3$lagliver_sofa_worst_hour8hr[is.na(sofa3$lagtime8hr)]<-0
+sofa3$lagliver_sofa_worst_hour9hr[is.na(sofa3$lagtime9hr)]<-0
+sofa3$lagliver_sofa_worst_hour10hr[is.na(sofa3$lagtime10hr)]<-0
+sofa3$lagliver_sofa_worst_hour11hr[is.na(sofa3$lagtime11hr)]<-0
+sofa3$lagliver_sofa_worst_hour12hr[is.na(sofa3$lagtime12hr)]<-0
+sofa3$lagliver_sofa_worst_hour13hr[is.na(sofa3$lagtime13hr)]<-0
+sofa3$lagliver_sofa_worst_hour14hr[is.na(sofa3$lagtime14hr)]<-0
+sofa3$lagliver_sofa_worst_hour15hr[is.na(sofa3$lagtime15hr)]<-0
+sofa3$lagliver_sofa_worst_hour16hr[is.na(sofa3$lagtime16hr)]<-0
+sofa3$lagliver_sofa_worst_hour17hr[is.na(sofa3$lagtime17hr)]<-0
+sofa3$lagliver_sofa_worst_hour18hr[is.na(sofa3$lagtime18hr)]<-0
+sofa3$lagliver_sofa_worst_hour19hr[is.na(sofa3$lagtime19hr)]<-0
+sofa3$lagliver_sofa_worst_hour20hr[is.na(sofa3$lagtime20hr)]<-0
+sofa3$lagliver_sofa_worst_hour21hr[is.na(sofa3$lagtime21hr)]<-0
+sofa3$lagliver_sofa_worst_hour22hr[is.na(sofa3$lagtime22hr)]<-0
+sofa3$lagliver_sofa_worst_hour23hr[is.na(sofa3$lagtime23hr)]<-0
+sofa3$lagliver_sofa_worst_hour24hr[is.na(sofa3$lagtime24hr)]<-0
+
+sofa3$lagcoagulation_sofa_worst_hour1hr[is.na(sofa3$lagtime1hr)]<-0
+sofa3$lagcoagulation_sofa_worst_hour2hr[is.na(sofa3$lagtime2hr)]<-0
+sofa3$lagcoagulation_sofa_worst_hour3hr[is.na(sofa3$lagtime3hr)]<-0
+sofa3$lagcoagulation_sofa_worst_hour4hr[is.na(sofa3$lagtime4hr)]<-0
+sofa3$lagcoagulation_sofa_worst_hour5hr[is.na(sofa3$lagtime5hr)]<-0
+sofa3$lagcoagulation_sofa_worst_hour6hr[is.na(sofa3$lagtime6hr)]<-0
+sofa3$lagcoagulation_sofa_worst_hour7hr[is.na(sofa3$lagtime7hr)]<-0
+sofa3$lagcoagulation_sofa_worst_hour8hr[is.na(sofa3$lagtime8hr)]<-0
+sofa3$lagcoagulation_sofa_worst_hour9hr[is.na(sofa3$lagtime9hr)]<-0
+sofa3$lagcoagulation_sofa_worst_hour10hr[is.na(sofa3$lagtime10hr)]<-0
+sofa3$lagcoagulation_sofa_worst_hour11hr[is.na(sofa3$lagtime11hr)]<-0
+sofa3$lagcoagulation_sofa_worst_hour12hr[is.na(sofa3$lagtime12hr)]<-0
+sofa3$lagcoagulation_sofa_worst_hour13hr[is.na(sofa3$lagtime13hr)]<-0
+sofa3$lagcoagulation_sofa_worst_hour14hr[is.na(sofa3$lagtime14hr)]<-0
+sofa3$lagcoagulation_sofa_worst_hour15hr[is.na(sofa3$lagtime15hr)]<-0
+sofa3$lagcoagulation_sofa_worst_hour16hr[is.na(sofa3$lagtime16hr)]<-0
+sofa3$lagcoagulation_sofa_worst_hour17hr[is.na(sofa3$lagtime17hr)]<-0
+sofa3$lagcoagulation_sofa_worst_hour18hr[is.na(sofa3$lagtime18hr)]<-0
+sofa3$lagcoagulation_sofa_worst_hour19hr[is.na(sofa3$lagtime19hr)]<-0
+sofa3$lagcoagulation_sofa_worst_hour20hr[is.na(sofa3$lagtime20hr)]<-0
+sofa3$lagcoagulation_sofa_worst_hour21hr[is.na(sofa3$lagtime21hr)]<-0
+sofa3$lagcoagulation_sofa_worst_hour22hr[is.na(sofa3$lagtime22hr)]<-0
+sofa3$lagcoagulation_sofa_worst_hour23hr[is.na(sofa3$lagtime23hr)]<-0
+sofa3$lagcoagulation_sofa_worst_hour24hr[is.na(sofa3$lagtime24hr)]<-0
+
+sofa3$lagkidney_sofa_worst_hour1hr[is.na(sofa3$lagtime1hr)]<-0
+sofa3$lagkidney_sofa_worst_hour2hr[is.na(sofa3$lagtime2hr)]<-0
+sofa3$lagkidney_sofa_worst_hour3hr[is.na(sofa3$lagtime3hr)]<-0
+sofa3$lagkidney_sofa_worst_hour4hr[is.na(sofa3$lagtime4hr)]<-0
+sofa3$lagkidney_sofa_worst_hour5hr[is.na(sofa3$lagtime5hr)]<-0
+sofa3$lagkidney_sofa_worst_hour6hr[is.na(sofa3$lagtime6hr)]<-0
+sofa3$lagkidney_sofa_worst_hour7hr[is.na(sofa3$lagtime7hr)]<-0
+sofa3$lagkidney_sofa_worst_hour8hr[is.na(sofa3$lagtime8hr)]<-0
+sofa3$lagkidney_sofa_worst_hour9hr[is.na(sofa3$lagtime9hr)]<-0
+sofa3$lagkidney_sofa_worst_hour10hr[is.na(sofa3$lagtime10hr)]<-0
+sofa3$lagkidney_sofa_worst_hour11hr[is.na(sofa3$lagtime11hr)]<-0
+sofa3$lagkidney_sofa_worst_hour12hr[is.na(sofa3$lagtime12hr)]<-0
+sofa3$lagkidney_sofa_worst_hour13hr[is.na(sofa3$lagtime13hr)]<-0
+sofa3$lagkidney_sofa_worst_hour14hr[is.na(sofa3$lagtime14hr)]<-0
+sofa3$lagkidney_sofa_worst_hour15hr[is.na(sofa3$lagtime15hr)]<-0
+sofa3$lagkidney_sofa_worst_hour16hr[is.na(sofa3$lagtime16hr)]<-0
+sofa3$lagkidney_sofa_worst_hour17hr[is.na(sofa3$lagtime17hr)]<-0
+sofa3$lagkidney_sofa_worst_hour18hr[is.na(sofa3$lagtime18hr)]<-0
+sofa3$lagkidney_sofa_worst_hour19hr[is.na(sofa3$lagtime19hr)]<-0
+sofa3$lagkidney_sofa_worst_hour20hr[is.na(sofa3$lagtime20hr)]<-0
+sofa3$lagkidney_sofa_worst_hour21hr[is.na(sofa3$lagtime21hr)]<-0
+sofa3$lagkidney_sofa_worst_hour22hr[is.na(sofa3$lagtime22hr)]<-0
+sofa3$lagkidney_sofa_worst_hour23hr[is.na(sofa3$lagtime23hr)]<-0
+sofa3$lagkidney_sofa_worst_hour24hr[is.na(sofa3$lagtime24hr)]<-0
+
+sofa3$lagrespiratory_sofa_worst_hour1hr[is.na(sofa3$lagtime1hr)]<-0
+sofa3$lagrespiratory_sofa_worst_hour2hr[is.na(sofa3$lagtime2hr)]<-0
+sofa3$lagrespiratory_sofa_worst_hour3hr[is.na(sofa3$lagtime3hr)]<-0
+sofa3$lagrespiratory_sofa_worst_hour4hr[is.na(sofa3$lagtime4hr)]<-0
+sofa3$lagrespiratory_sofa_worst_hour5hr[is.na(sofa3$lagtime5hr)]<-0
+sofa3$lagrespiratory_sofa_worst_hour6hr[is.na(sofa3$lagtime6hr)]<-0
+sofa3$lagrespiratory_sofa_worst_hour7hr[is.na(sofa3$lagtime7hr)]<-0
+sofa3$lagrespiratory_sofa_worst_hour8hr[is.na(sofa3$lagtime8hr)]<-0
+sofa3$lagrespiratory_sofa_worst_hour9hr[is.na(sofa3$lagtime9hr)]<-0
+sofa3$lagrespiratory_sofa_worst_hour10hr[is.na(sofa3$lagtime10hr)]<-0
+sofa3$lagrespiratory_sofa_worst_hour11hr[is.na(sofa3$lagtime11hr)]<-0
+sofa3$lagrespiratory_sofa_worst_hour12hr[is.na(sofa3$lagtime12hr)]<-0
+sofa3$lagrespiratory_sofa_worst_hour13hr[is.na(sofa3$lagtime13hr)]<-0
+sofa3$lagrespiratory_sofa_worst_hour14hr[is.na(sofa3$lagtime14hr)]<-0
+sofa3$lagrespiratory_sofa_worst_hour15hr[is.na(sofa3$lagtime15hr)]<-0
+sofa3$lagrespiratory_sofa_worst_hour16hr[is.na(sofa3$lagtime16hr)]<-0
+sofa3$lagrespiratory_sofa_worst_hour17hr[is.na(sofa3$lagtime17hr)]<-0
+sofa3$lagrespiratory_sofa_worst_hour18hr[is.na(sofa3$lagtime18hr)]<-0
+sofa3$lagrespiratory_sofa_worst_hour19hr[is.na(sofa3$lagtime19hr)]<-0
+sofa3$lagrespiratory_sofa_worst_hour20hr[is.na(sofa3$lagtime20hr)]<-0
+sofa3$lagrespiratory_sofa_worst_hour21hr[is.na(sofa3$lagtime21hr)]<-0
+sofa3$lagrespiratory_sofa_worst_hour22hr[is.na(sofa3$lagtime22hr)]<-0
+sofa3$lagrespiratory_sofa_worst_hour23hr[is.na(sofa3$lagtime23hr)]<-0
+sofa3$lagrespiratory_sofa_worst_hour24hr[is.na(sofa3$lagtime24hr)]<-0
+
+#max in last 24 hours
+sofa3$max_cardiovascular_last_24<-apply(sofa3[, c(
+  "cardiovascular_sofa_worst_hour",
+  "lagcardiovascular_sofa_worst_hour1hr",
+  "lagcardiovascular_sofa_worst_hour2hr",
+  "lagcardiovascular_sofa_worst_hour3hr",
+  "lagcardiovascular_sofa_worst_hour4hr",
+  "lagcardiovascular_sofa_worst_hour5hr",
+  "lagcardiovascular_sofa_worst_hour6hr",
+  "lagcardiovascular_sofa_worst_hour7hr",
+  "lagcardiovascular_sofa_worst_hour8hr",
+  "lagcardiovascular_sofa_worst_hour9hr",
+  "lagcardiovascular_sofa_worst_hour10hr",
+  "lagcardiovascular_sofa_worst_hour11hr",
+  "lagcardiovascular_sofa_worst_hour12hr",
+  "lagcardiovascular_sofa_worst_hour13hr",
+  "lagcardiovascular_sofa_worst_hour14hr",
+  "lagcardiovascular_sofa_worst_hour15hr",
+  "lagcardiovascular_sofa_worst_hour16hr",
+  "lagcardiovascular_sofa_worst_hour17hr",
+  "lagcardiovascular_sofa_worst_hour18hr",
+  "lagcardiovascular_sofa_worst_hour19hr",
+  "lagcardiovascular_sofa_worst_hour20hr",
+  "lagcardiovascular_sofa_worst_hour21hr",
+  "lagcardiovascular_sofa_worst_hour22hr",
+  "lagcardiovascular_sofa_worst_hour23hr",
+  "lagcardiovascular_sofa_worst_hour24hr"
+  )], 1, max)
+
+sofa3$max_nervous_last_24<-apply(sofa3[, c(
+  "nervous_sofa_worst_hour",
+  "lagnervous_sofa_worst_hour1hr",
+  "lagnervous_sofa_worst_hour2hr",
+  "lagnervous_sofa_worst_hour3hr",
+  "lagnervous_sofa_worst_hour4hr",
+  "lagnervous_sofa_worst_hour5hr",
+  "lagnervous_sofa_worst_hour6hr",
+  "lagnervous_sofa_worst_hour7hr",
+  "lagnervous_sofa_worst_hour8hr",
+  "lagnervous_sofa_worst_hour9hr",
+  "lagnervous_sofa_worst_hour10hr",
+  "lagnervous_sofa_worst_hour11hr",
+  "lagnervous_sofa_worst_hour12hr",
+  "lagnervous_sofa_worst_hour13hr",
+  "lagnervous_sofa_worst_hour14hr",
+  "lagnervous_sofa_worst_hour15hr",
+  "lagnervous_sofa_worst_hour16hr",
+  "lagnervous_sofa_worst_hour17hr",
+  "lagnervous_sofa_worst_hour18hr",
+  "lagnervous_sofa_worst_hour19hr",
+  "lagnervous_sofa_worst_hour20hr",
+  "lagnervous_sofa_worst_hour21hr",
+  "lagnervous_sofa_worst_hour22hr",
+  "lagnervous_sofa_worst_hour23hr",
+  "lagnervous_sofa_worst_hour24hr"
+  )], 1, max)
+
+sofa3$max_liver_last_24<-apply(sofa3[, c(
+  "liver_sofa_worst_hour",
+  "lagliver_sofa_worst_hour1hr",
+  "lagliver_sofa_worst_hour2hr",
+  "lagliver_sofa_worst_hour3hr",
+  "lagliver_sofa_worst_hour4hr",
+  "lagliver_sofa_worst_hour5hr",
+  "lagliver_sofa_worst_hour6hr",
+  "lagliver_sofa_worst_hour7hr",
+  "lagliver_sofa_worst_hour8hr",
+  "lagliver_sofa_worst_hour9hr",
+  "lagliver_sofa_worst_hour10hr",
+  "lagliver_sofa_worst_hour11hr",
+  "lagliver_sofa_worst_hour12hr",
+  "lagliver_sofa_worst_hour13hr",
+  "lagliver_sofa_worst_hour14hr",
+  "lagliver_sofa_worst_hour15hr",
+  "lagliver_sofa_worst_hour16hr",
+  "lagliver_sofa_worst_hour17hr",
+  "lagliver_sofa_worst_hour18hr",
+  "lagliver_sofa_worst_hour19hr",
+  "lagliver_sofa_worst_hour20hr",
+  "lagliver_sofa_worst_hour21hr",
+  "lagliver_sofa_worst_hour22hr",
+  "lagliver_sofa_worst_hour23hr",
+  "lagliver_sofa_worst_hour24hr"
+  )], 1, max)
+
+sofa3$max_coagulation_last_24<-apply(sofa3[, c(
+  "coagulation_sofa_worst_hour",
+  "lagcoagulation_sofa_worst_hour1hr",
+  "lagcoagulation_sofa_worst_hour2hr",
+  "lagcoagulation_sofa_worst_hour3hr",
+  "lagcoagulation_sofa_worst_hour4hr",
+  "lagcoagulation_sofa_worst_hour5hr",
+  "lagcoagulation_sofa_worst_hour6hr",
+  "lagcoagulation_sofa_worst_hour7hr",
+  "lagcoagulation_sofa_worst_hour8hr",
+  "lagcoagulation_sofa_worst_hour9hr",
+  "lagcoagulation_sofa_worst_hour10hr",
+  "lagcoagulation_sofa_worst_hour11hr",
+  "lagcoagulation_sofa_worst_hour12hr",
+  "lagcoagulation_sofa_worst_hour13hr",
+  "lagcoagulation_sofa_worst_hour14hr",
+  "lagcoagulation_sofa_worst_hour15hr",
+  "lagcoagulation_sofa_worst_hour16hr",
+  "lagcoagulation_sofa_worst_hour17hr",
+  "lagcoagulation_sofa_worst_hour18hr",
+  "lagcoagulation_sofa_worst_hour19hr",
+  "lagcoagulation_sofa_worst_hour20hr",
+  "lagcoagulation_sofa_worst_hour21hr",
+  "lagcoagulation_sofa_worst_hour22hr",
+  "lagcoagulation_sofa_worst_hour23hr",
+  "lagcoagulation_sofa_worst_hour24hr"
+  )], 1, max)
+
+sofa3$max_kidney_last_24<-apply(sofa3[, c(
+  "kidney_sofa_worst_hour",
+  "lagkidney_sofa_worst_hour1hr",
+  "lagkidney_sofa_worst_hour2hr",
+  "lagkidney_sofa_worst_hour3hr",
+  "lagkidney_sofa_worst_hour4hr",
+  "lagkidney_sofa_worst_hour5hr",
+  "lagkidney_sofa_worst_hour6hr",
+  "lagkidney_sofa_worst_hour7hr",
+  "lagkidney_sofa_worst_hour8hr",
+  "lagkidney_sofa_worst_hour9hr",
+  "lagkidney_sofa_worst_hour10hr",
+  "lagkidney_sofa_worst_hour11hr",
+  "lagkidney_sofa_worst_hour12hr",
+  "lagkidney_sofa_worst_hour13hr",
+  "lagkidney_sofa_worst_hour14hr",
+  "lagkidney_sofa_worst_hour15hr",
+  "lagkidney_sofa_worst_hour16hr",
+  "lagkidney_sofa_worst_hour17hr",
+  "lagkidney_sofa_worst_hour18hr",
+  "lagkidney_sofa_worst_hour19hr",
+  "lagkidney_sofa_worst_hour20hr",
+  "lagkidney_sofa_worst_hour21hr",
+  "lagkidney_sofa_worst_hour22hr",
+  "lagkidney_sofa_worst_hour23hr",
+  "lagkidney_sofa_worst_hour24hr"
+  )], 1, max)
+
+sofa3$max_respiratory_last_24<-apply(sofa3[, c(
+  "respiratory_sofa_worst_hour",
+  "lagrespiratory_sofa_worst_hour1hr",
+  "lagrespiratory_sofa_worst_hour2hr",
+  "lagrespiratory_sofa_worst_hour3hr",
+  "lagrespiratory_sofa_worst_hour4hr",
+  "lagrespiratory_sofa_worst_hour5hr",
+  "lagrespiratory_sofa_worst_hour6hr",
+  "lagrespiratory_sofa_worst_hour7hr",
+  "lagrespiratory_sofa_worst_hour8hr",
+  "lagrespiratory_sofa_worst_hour9hr",
+  "lagrespiratory_sofa_worst_hour10hr",
+  "lagrespiratory_sofa_worst_hour11hr",
+  "lagrespiratory_sofa_worst_hour12hr",
+  "lagrespiratory_sofa_worst_hour13hr",
+  "lagrespiratory_sofa_worst_hour14hr",
+  "lagrespiratory_sofa_worst_hour15hr",
+  "lagrespiratory_sofa_worst_hour16hr",
+  "lagrespiratory_sofa_worst_hour17hr",
+  "lagrespiratory_sofa_worst_hour18hr",
+  "lagrespiratory_sofa_worst_hour19hr",
+  "lagrespiratory_sofa_worst_hour20hr",
+  "lagrespiratory_sofa_worst_hour21hr",
+  "lagrespiratory_sofa_worst_hour22hr",
+  "lagrespiratory_sofa_worst_hour23hr",
+  "lagrespiratory_sofa_worst_hour24hr"
+  )], 1, max)
+
+#worst 24
+sofa3$max_totalsofa_last_24<-sofa3$max_cardiovascular_last_24+sofa3$max_nervous_last_24+sofa3$max_liver_last_24+sofa3$max_coagulation_last_24+sofa3$max_kidney_last_24+sofa3$max_respiratory_last_24
+
+#worst hourly/current
+sofa3$max_totalsofa_current<-sofa3$cardiovascular_sofa_worst_hour+sofa3$nervous_sofa_worst_hour+sofa3$liver_sofa_worst_hour+sofa3$coagulation_sofa_worst_hour+sofa3$kidney_sofa_worst_hour+sofa3$respiratory_sofa_worst_hour
+
+sofa4<-sofa3[,c("patientunitstayid","time","cardiovascular_sofa_worst_hour","nervous_sofa_worst_hour", "liver_sofa_worst_hour", "coagulation_sofa_worst_hour", "kidney_sofa_worst_hour", "respiratory_sofa_worst_hour","max_totalsofa_current","max_totalsofa_last_24")]
+```
+
+
+
+# write to csv
+```{r csv}
+write.csv(sofa4, file="eicu_sofa_hourly_worst.csv", row.names = FALSE)
+```
+
