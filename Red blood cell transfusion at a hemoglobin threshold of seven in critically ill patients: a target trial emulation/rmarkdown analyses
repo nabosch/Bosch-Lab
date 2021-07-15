@@ -244,13 +244,7 @@ lac1$hgb_lac_time<-lac1$lac_time-lac1$hgb_time
 lac_out<-lac1[!is.na(lac1$hgb_lac_time) & lac1$hgb_lac_time>=1440 & lac1$hgb_lac_time<4320,] %>% group_by(stay_id, hgb_time) %>% arrange(desc(lac)) %>% slice(1L)
 lac_out$lac_out<-lac_out$lac
 ds14<-left_join(ds13, lac_out[,c("stay_id","hgb_time","lac_out")])
-
-#temp outcome wrangling
-temp1<-left_join(ds5, temp[,c("subject_id","stay_id","temp_time","temp")])
-temp1$hgb_temp_time<-temp1$temp_time-temp1$hgb_time
-temp_out<-temp1[!is.na(temp1$hgb_temp_time) & temp1$hgb_temp_time>=1440 & temp1$hgb_temp_time<4320,] %>% group_by(stay_id, hgb_time) %>% arrange(desc(temp)) %>% slice(1L)
-temp_out$temp_out<-temp_out$temp
-ds16<-left_join(ds14, temp_out[,c("stay_id","hgb_time","temp_out")])
+ds16<-ds14
 
 ## reversed hgb for rdd
 ds16$reverse_normalized_hgb<--(ds16$hgb-6.9)
@@ -479,13 +473,7 @@ lac1$hgb_lac_time<-lac1$lac_time-lac1$hgb_time
 lac_out<-lac1[!is.na(lac1$hgb_lac_time) & lac1$hgb_lac_time>=1440 & lac1$hgb_lac_time<4320,] %>% group_by(stay_id, hgb_time) %>% arrange(desc(lac)) %>% slice(1L)
 lac_out$lac_out<-lac_out$lac
 ds14<-left_join(ds13, lac_out[,c("stay_id","hgb_time","lac_out")])
-
-#temp outcome wrangling
-temp1<-left_join(ds5, temp[,c("subject_id","stay_id","temp_time","temp")])
-temp1$hgb_temp_time<-temp1$temp_time-temp1$hgb_time
-temp_out<-temp1[!is.na(temp1$hgb_temp_time) & temp1$hgb_temp_time>=1440 & temp1$hgb_temp_time<4320,] %>% group_by(stay_id, hgb_time) %>% arrange(desc(temp)) %>% slice(1L)
-temp_out$temp_out<-temp_out$temp
-ds16<-left_join(ds14, temp_out[,c("stay_id","hgb_time","temp_out")])
+ds16<-ds14
 
 ## reversed hgb for rdd
 ds16$reverse_normalized_hgb<--(ds16$hgb-6.9)
