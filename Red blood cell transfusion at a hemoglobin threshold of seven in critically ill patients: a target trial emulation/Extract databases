@@ -39,9 +39,9 @@
 -- eICU datasets (PostgreSQL)
     -- eicu_icu dataset
     select patientunitstayid, uniquepid, patienthealthsystemstayid, gender, age, unitdischargeoffset, hospitalid, unitvisitnumber as icustay_seq, hospitaldischargeoffset, unittype, case when hospitaldischargestatus='Alive' then 0 else 1 end as hospital_expire_flag, case when gender='Female' then 1 else 0 end as female from `physionet-data.eicu_crd.patient`;
-    -- eicu_icd_codes dataset (note regexp_split_to_array only works in postgresql, needs to be adapted to BigQuery)
+    -- eicu_icd_codes dataset 
     select patientunitstayid, icd9code[1] as icd9, icd9code[2] as icd10 from (select regexp_split_to_array(icd9code, ','), patientunitstayid from diagnosis) as dt(icd9code);
-    -- eicu_sofa_hourly_worst dataset is created using a separate Rmarkdown file uploaded to github and accompianing datasets prior to import into the Rmarkdown analysis code. To create the eICU sofa dataset, first run each of the below SQL statements to crate the datasets necessary for the eicu_sofa Rmarkdown code. Then run the eicu_sofa Rmarkdown file 
+    -- eicu_sofa_hourly_worst dataset is created using a separate Rmarkdown script (eicu_sofa) uploaded to github and accompianing datasets prior to import into the Rmarkdown analysis code. To create the eICU sofa dataset, first run each of the below SQL statements to crate the datasets necessary for the eicu_sofa Rmarkdown code. Then run the eicu_sofa Rmarkdown script 
         -- infusion_norepinephrine dataset
         select * from infusiondrug where drugname in(
         'levophed  (mcg/min)',
