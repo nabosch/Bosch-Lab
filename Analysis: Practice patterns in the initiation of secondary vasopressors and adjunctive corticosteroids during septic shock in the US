@@ -1,0 +1,1324 @@
+---
+title: "practice pattern variation in norepinephrine adjunct treatments during septic shock"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  word_document:
+    toc: yes
+  html_document:
+    toc: yes
+    toc_float: yes
+    theme: united
+---
+
+
+```{r setup, include=FALSE}
+library(dplyr)
+library(ggplot2)
+library(haven)
+library(tidyr)
+library(Hmisc)
+library(lme4)
+library(mice)
+library(VIM)
+library(tableone)
+library(zoo)
+library(DescTools)
+library(stringr)
+library(rcompanion)
+library(merTools)
+library(performance)
+library(cvcqv)
+library(ggpubr)
+library(mgcv)
+knitr::opts_chunk$set(echo=T, results='hide', warning=F, tidy=T)
+Sys.setenv(TZ = "EST")
+setwd("e:/Research Projects/vasopressors/r_vasopressors/")
+set.seed(14)
+
+#CUSTOM FUNCTIONS
+na.locf2 <- function(x) {na.locf(x, na.rm = FALSE)}
+glmer_coef<- function(x) {tidy(x,conf.int=TRUE, effects="fixed")}
+pred_lmer<-function(x,y) {predict(getfit(x, y))}
+```
+
+# Cohort Wrangling
+## Import SQL datasets
+```{r import}
+icd<-read.csv(file="icd.csv", stringsAsFactors = FALSE)
+age<-read.csv(file="age.csv", stringsAsFactors = FALSE)
+pt<-read.csv(file="patient.csv", stringsAsFactors = FALSE)
+nori<-read.csv(file="infusion_norepinephrine.csv", stringsAsFactors = FALSE)
+norm<-read.csv(file="medication_norepinephrine.csv", stringsAsFactors = FALSE)
+vasi<-read.csv(file="infusion_vasopressin.csv", stringsAsFactors = FALSE)
+dopi<-read.csv(file="infusion_dopamine.csv", stringsAsFactors = FALSE)
+epii<-read.csv(file="infusion_epinephrine.csv", stringsAsFactors = FALSE)
+phei<-read.csv(file="infusion_phenylephrine.csv", stringsAsFactors = FALSE)
+svt<-read.csv(file="svt.csv", stringsAsFactors = FALSE)
+ri<-read.csv(file="renalinsufficiency.csv", stringsAsFactors = FALSE)
+ap<-read.csv(file="apache.csv", stringsAsFactors = FALSE)
+ho<-read.csv(file="hospital.csv", stringsAsFactors = FALSE)
+mveri<-read.csv(file="philipseriventilationepisode.csv", stringsAsFactors = FALSE)
+cort<-read.csv(file="corticosteroids.csv", stringsAsFactors = FALSE)
+precort<-read.csv(file="preadmission_glucocorticoid.csv", stringsAsFactors = FALSE)
+sofa<-read.csv(file="eicu_sofa.csv", stringsAsFactors = FALSE)
+io<-read.csv(file="io.csv", stringsAsFactors = FALSE)
+anyinfusion<-read.csv(file="anyinfusion.csv", stringsAsFactors = FALSE)
+lac<-read.csv(file="lactate.csv", stringsAsFactors = FALSE)
+abx1<-read.csv(file="infusionabx.csv", stringsAsFactors = FALSE)
+abx2<-read.csv(file="medabx.csv", stringsAsFactors = FALSE)
+alb<-read.csv(file="albumin.csv", stringsAsFactors = FALSE)
+```
+
+###NOTE THAT THERE ARE TWO STEPS IN THE BELOW WRANGLING STEP THAT SHOULD ONLY BE RUN FOR THE SENSITIVITY ANALYSIS (alternative septic shock definition) - otherwise these steps should be bipassed
+
+
+## Patients with sepsis started on norepinephrine
+```{r wranglingsepsisnorepi}
+nrow(anyinfusion) #number of icu stays with any infusion recorded
+anyinfusion2<-left_join(anyinfusion, pt)
+nrow(anyinfusion2 %>% group_by(hospitalid) %>% slice(1L)) #number of hospitals with recordings in infusion table
+
+pt<-anyinfusion2
+
+# initial cohort selection
+#angus
+icd1<-icd[icd$icd9code!="",]
+a<-(str_split(icd1$icd9code, ", "))
+b<-data.frame(patientunitstayid = rep(icd1$patientunitstayid, sapply(a, length)), icd9code = unlist(a))
+c<-distinct(b)
+c$code<-as.numeric(c$icd9code)
+d<-c[!is.na(c$code),]
+d$code<-sub("\\.", "", d$icd9code)
+
+#angus build infection component
+d$infection<-0
+d$infection[substr(d$code, 1,3) %in% c("001","002","003","004","005","008","009","010","011","012","013","014","015","016","017","018","020","021","022","023","024","025","026","027","030","031","032","033","034","035","036","037","038","039","040","041","090","091","092","093","094","095","096","097","098","100","101","102","103","104","110","111","112","114","115","116","117","118","320","322","324","325","420","421","451","461","462","463","464","465","481","482","485","486","494","510","513","540","541","542","566","567","590","597","601","614","615","616","681","682","683","686","730")]<-1
+d$infection[substr(d$code, 1,4) %in% c("5695","5720","5721","5750","5990","7110","7907","9966","9985","9993")]<-1   
+d$infection[substr(d$code, 1,5) %in% c("49121","56201","56203","56211","56213","56983")]<-1                    
+
+#angus build organ dysfunction
+d$organ<-0
+d$organ[substr(d$code, 1,3) %in% c("458","293","570","584")]<-1
+d$organ[substr(d$code, 1,4) %in% c("7855","3483","3481","2874","2875","2869","2866","5734")]<-1 
+
+d$explicitsepsis<-0
+d$explicitsepsis[substr(d$code, 1,5) %in% c("99592","78552")]<-1
+
+#####################ONLY USE FOR SENSITVITY ANALYSIS!!!
+abx1$time<-abx1$infusionoffset
+abx2$time<-abx2$drugstartoffset
+abx<-full_join(abx1[,c("patientunitstayid","time")],abx2[,c("patientunitstayid","time")])
+abx$abx<-1
+lac$time<-lac$labresultoffset
+lac$lac<-lac$labresult
+abx3<-full_join(abx, lac[,c("patientunitstayid","lac","time")])
+####################
+
+#adding mechanical ventilation
+mveri1<-mveri[!is.na(mveri$segment_start) & mveri$ventilation_type=="invasive" & (mveri$segment_end-mveri$segment_start>60),] #keeping only those with mv durations longer than 1 hour
+mveri2<-mveri1 %>% group_by(patientunitstayid) %>% slice(1L)
+mveri2$mv<-1
+
+e<-left_join(d, mveri2[,c("patientunitstayid","mv")])
+e$angus<-0
+e$angus[e$explicitsepsis==1 | (e$infection==1 & e$organ==1) | (e$infection==1 & e$mv==1)]<-1
+sp<-e[e$angus==1,]
+
+
+## marking inclusion criteria
+sp$sp<-1
+sp<-sp[,c("patientunitstayid","sp")]
+age$age_criteria<-1
+
+## joining sepsis and age criteria tables
+inc<-left_join(pt, age)
+inc<-left_join(inc, sp)
+
+## identify n without each inclusion criteria
+nrow(inc[is.na(inc$age_criteria),]) #age
+nrow(inc[is.na(inc$sp),]) #sepsis
+
+## remove those without inclusion criteria
+inc1<-inc[!is.na(inc$age_criteria) & !is.na(inc$sp),] 
+nrow(inc1)
+nrow(inc1 %>% group_by(hospitalid) %>% slice(1L))
+inc1$inc<-1
+
+# pressors wrangling
+## norepinephrine
+norm <- norm %>% rename(med_drugname=drugname)
+nor<-left_join(nori,norm)
+nor<-left_join(nor,pt[,c("patientunitstayid","admissionweight","dischargeweight")])
+nor$patientweight[is.na(nor$patientweight)]<-nor$admissionweight[is.na(nor$patientweight)] #using (1)admission weight or (2)discharge weight for patient weight (dosing weight) if patient weight missing
+nor$patientweight[is.na(nor$patientweight) & is.na(nor$admissionweight)]<-nor$dischargeweight[is.na(nor$patientweight) & is.na(nor$admissionweight)]
+nor$time<-nor$infusionoffset
+
+### norepinephrine dose conversions
+nor$drugrate<-as.numeric(nor$drugrate)
+nor<-nor[!is.na(nor$drugrate),] #removing those with drugrates that are missing after conversion to numeric
+nor$nordose<-NA
+
+#### mcg/min
+nor$nordose[nor$drugname=="levophed  (mcg/min)"|
+              nor$drugname=="levophed (mcg/min)"|
+              nor$drugname=="Levophed (mcg/min)"|
+              nor$drugname=="Norepinephrine (mcg/min)"|
+              nor$drugname=="Norepinephrine MAX 32 mg Dextrose 5% 250 ml (mcg/min)"|
+              nor$drugname=="Norepinephrine MAX 32 mg Dextrose 5% 500 ml (mcg/min)"|
+              nor$drugname=="Norepinephrine STD 32 mg Dextrose 5% 282 ml (mcg/min)"|
+              nor$drugname=="Norepinephrine STD 32 mg Dextrose 5% 500 ml (mcg/min)"|
+              nor$drugname=="Norepinephrine STD 4 mg Dextrose 5% 250 ml (mcg/min)"|
+              nor$drugname=="Norepinephrine STD 4 mg Dextrose 5% 500 ml (mcg/min)"|
+              nor$drugname=="Norepinephrine STD 8 mg Dextrose 5% 250 ml (mcg/min)"|
+              nor$drugname=="Norepinephrine STD 8 mg Dextrose 5% 500 ml (mcg/min)"]<-nor$drugrate[nor$drugname=="levophed  (mcg/min)"|
+              nor$drugname=="levophed (mcg/min)"|
+              nor$drugname=="Levophed (mcg/min)"|
+              nor$drugname=="Norepinephrine (mcg/min)"|
+              nor$drugname=="Norepinephrine MAX 32 mg Dextrose 5% 250 ml (mcg/min)"|
+              nor$drugname=="Norepinephrine MAX 32 mg Dextrose 5% 500 ml (mcg/min)"|
+              nor$drugname=="Norepinephrine STD 32 mg Dextrose 5% 282 ml (mcg/min)"|
+              nor$drugname=="Norepinephrine STD 32 mg Dextrose 5% 500 ml (mcg/min)"|
+              nor$drugname=="Norepinephrine STD 4 mg Dextrose 5% 250 ml (mcg/min)"|
+              nor$drugname=="Norepinephrine STD 4 mg Dextrose 5% 500 ml (mcg/min)"|
+              nor$drugname=="Norepinephrine STD 8 mg Dextrose 5% 250 ml (mcg/min)"|
+              nor$drugname=="Norepinephrine STD 8 mg Dextrose 5% 500 ml (mcg/min)"]
+
+#### mcg/kg/min
+nor$nordose[nor$drugname=="Levophed (mcg/kg/min)"|
+              nor$drugname=="Norepinephrine (mcg/kg/min)"]<-nor$drugrate[nor$drugname=="Levophed (mcg/kg/min)"|
+              nor$drugname=="Norepinephrine (mcg/kg/min)"]*nor$patientweight[nor$drugname=="Levophed (mcg/kg/min)"|
+              nor$drugname=="Norepinephrine (mcg/kg/min)"]
+
+#### mg/kg/min (entries appear to be inaccurately recorded as mg (doses instead appear to be mcg)
+nor$nordose[nor$drugname=="Norepinephrine (mg/kg/min)"]<-nor$drugrate[nor$drugname=="Norepinephrine (mg/kg/min)"]*nor$patientweight[nor$drugname=="Norepinephrine (mg/kg/min)"]
+
+#### mcg/hr
+nor$nordose[nor$drugname=="Norepinephrine (mcg/hr)"]<-nor$drugrate[nor$drugname=="Norepinephrine (mcg/hr)"]/60
+
+#### mcg/kg/hr
+nor$nordose[nor$drugname=="Norepinephrine (mcg/kg/hr)"]<-nor$drugrate[nor$drugname=="Norepinephrine (mcg/kg/hr)"]*nor$patientweight[nor$drugname=="Norepinephrine (mcg/kg/hr)"]/60
+
+#### mg/hr
+nor$nordose[nor$drugname=="Levophed (mg/hr)"|
+              nor$drugname=="Norepinephrine (mg/hr)"]<-nor$drugrate[nor$drugname=="Levophed (mg/hr)"|
+              nor$drugname=="Norepinephrine (mg/hr)"]*(1000/60)
+
+#### mg/min (appears to be inaccurately recorded as mg (doses instead appear to be mcg)
+nor$nordose[nor$drugname=="Norepinephrine (mg/min)"]<-nor$drugrate[nor$drugname=="Norepinephrine (mg/min)"]
+
+#### units/min (appears to be recorded in units of mcg/min)
+nor$nordose[nor$drugname=="Norepinephrine (units/min)"]<-nor$drugrate[nor$drugname=="Norepinephrine (units/min)"]
+
+
+#### ml/hr 8mg/250ml medication table concentration
+nor$nordose[(nor$drugname=="levophed (ml/hr)"|
+              nor$drugname=="Levophed (ml/hr)"|
+              nor$drugname=="Norepinephrine (ml/hr)"|
+              nor$drugname=="norepinephrine Volume (ml) (ml/hr)") &
+              (!is.na(nor$med_drugname) &
+                 (nor$med_drugname=="250 ML PLAS CONT : NOREPINEPHRINE IN D5W 8 MG/250 ML"|
+                    nor$med_drugname=="NOREPINEPHRINE 8 MG in 250mL NS"))]<-nor$drugrate[(nor$drugname=="levophed (ml/hr)"|
+              nor$drugname=="Levophed (ml/hr)"|
+              nor$drugname=="Norepinephrine (ml/hr)"|
+              nor$drugname=="norepinephrine Volume (ml) (ml/hr)") &
+              (!is.na(nor$med_drugname) &
+                 (nor$med_drugname=="250 ML PLAS CONT : NOREPINEPHRINE IN D5W 8 MG/250 ML"|
+                    nor$med_drugname=="NOREPINEPHRINE 8 MG in 250mL NS"))]*(32/60)
+
+#### ml/hr 4mg/250ml medication table concentration
+nor$nordose[(nor$drugname=="levophed (ml/hr)"|
+              nor$drugname=="Levophed (ml/hr)"|
+              nor$drugname=="Norepinephrine (ml/hr)"|
+              nor$drugname=="norepinephrine Volume (ml) (ml/hr)") &
+              (!is.na(nor$med_drugname) &
+                 (nor$med_drugname=="NOREPINEPHRINE 4 MG/250 ML NS"|
+                    nor$med_drugname=="NOREPINEPHRINE 4 MG/250 ML NS INFUSION (STD CON'C) (REPACKAGE)"|
+                    nor$med_drugname=="PRMX NOREPInephrine 4 mg/250 mL NS Drip"))]<-nor$drugrate[(nor$drugname=="levophed (ml/hr)"|
+              nor$drugname=="Levophed (ml/hr)"|
+              nor$drugname=="Norepinephrine (ml/hr)"|
+              nor$drugname=="norepinephrine Volume (ml) (ml/hr)") &
+              (!is.na(nor$med_drugname) &
+                 (nor$med_drugname=="NOREPINEPHRINE 4 MG/250 ML NS"|
+                    nor$med_drugname=="NOREPINEPHRINE 4 MG/250 ML NS INFUSION (STD CON'C) (REPACKAGE)"|
+                    nor$med_drugname=="PRMX NOREPInephrine 4 mg/250 mL NS Drip"))]*(16/60)
+
+#### ml/hr no medication table concentration (assumed concentration of 16mg/1000ml)
+nor$nordose[(nor$drugname=="levophed (ml/hr)"|
+              nor$drugname=="Levophed (ml/hr)"|
+              nor$drugname=="Norepinephrine (ml/hr)"|
+              nor$drugname=="norepinephrine Volume (ml) (ml/hr)") &
+              (is.na(nor$nordose))]<-nor$drugrate[(nor$drugname=="levophed (ml/hr)"|
+              nor$drugname=="Levophed (ml/hr)"|
+              nor$drugname=="Norepinephrine (ml/hr)"|
+              nor$drugname=="norepinephrine Volume (ml) (ml/hr)") &
+              (is.na(nor$nordose))]*(16/60)
+
+#### no infusion units but entry has drug amount and volume of fluid labeled in convertible fashion (e.g. 4 in 250 -> 16/1000)
+nor$nordose[(nor$drugname=="Norepinephrine ()") &
+              (is.na(nor$nordose)) & nor$volumeoffluid==250 & nor$drugamount==4 & !is.na(nor$volumeoffluid) & !is.na(nor$drugamount)]<-nor$drugrate[(nor$drugname=="Norepinephrine ()") &
+              (is.na(nor$nordose)) & nor$volumeoffluid==250 & nor$drugamount==4 & !is.na(nor$volumeoffluid) & !is.na(nor$drugamount)]*(16/60)
+
+nor$weight_based<-0
+nor$weight_based[nor$drugname %like% "%kg%"|nor$drugname %like% "%KG%"|nor$drugname %like% "%Kg%"]<-1
+
+#### removing entries that cannot be converted and keeping only dose, time, and patientunitstayid
+nor1<-nor[!is.na(nor$nordose),c("patientunitstayid","time","nordose","patientweight","weight_based")]
+
+## vasopressin
+### adding time variable and removing those without a drugrate that is convertible to numberic
+vasi$time<-vasi$infusionoffset
+vasi$drugrate<-as.numeric(vasi$drugrate)
+vasi4<-vasi[!is.na(vasi$drugrate) & vasi$drugrate>=0,]
+
+### marking where vasopressin infusion is on or off
+vasi4$vaso<-0
+vasi4$vaso[vasi4$drugrate>0]<-1
+
+
+## dopamine
+### adding time variable and removing those without a drugrate that is convertible to numberic
+dopi$time<-dopi$infusionoffset
+dopi$drugrate<-as.numeric(dopi$drugrate)
+dopi4<-dopi[!is.na(dopi$drugrate) & dopi$drugrate>=0,]
+
+### marking where dopamine is on or off
+dopi4$dopa<-0
+dopi4$dopa[dopi4$drugrate>0]<-1
+
+## epinephrine
+### adding time variable and removing those without a drugrate that is convertible to numberic
+epii$time<-epii$infusionoffset
+epii$drugrate<-as.numeric(epii$drugrate)
+epii4<-epii[!is.na(epii$drugrate) & epii$drugrate>=0,]
+
+### marking where epinephrine is on or off
+epii4$epi<-0
+epii4$epi[epii4$drugrate>0]<-1
+
+## phenylephrine
+### adding time variable and removing those without a drugrate that is convertible to numberic
+phei$time<-phei$infusionoffset
+phei$drugrate<-as.numeric(phei$drugrate)
+phei4<-phei[!is.na(phei$drugrate) & phei$drugrate>=0,]
+
+### marking where phenylephrine is on or off
+phei4$phe<-0
+phei4$phe[phei4$drugrate>0]<-1
+
+## adding adjunctive vasopressors to norepinephrine and using locf where infusions rates are missing
+pr<-full_join(nor1, vasi4[,c("patientunitstayid","time","vaso")])
+pr1<-full_join(pr, dopi4[,c("patientunitstayid","time","dopa")])
+pr1<-full_join(pr1, epii4[,c("patientunitstayid","time","epi")])
+pr1<-full_join(pr1, phei4[,c("patientunitstayid","time","phe")])
+pr2<-pr1 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(nordose = na.locf2(nordose)) #locf for nordose
+pr3<-pr2 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(dopa = na.locf2(dopa)) #locf for dopa
+pr4<-pr3 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(vaso = na.locf2(vaso)) #locf for vasopressin
+pr5<-pr4 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(epi = na.locf2(epi)) #locf for epinephrine
+pr6<-pr5 %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(phe = na.locf2(phe)) #locf for phenylephrine
+
+pr6$dopa[is.na(pr6$dopa)]<-0
+pr6$vaso[is.na(pr6$vaso)]<-0
+pr6$epi[is.na(pr6$epi)]<-0
+pr6$phe[is.na(pr6$phe)]<-0
+pr6$nordose[is.na(pr6$nordose)]<-0
+pr6$nordose<-ceiling(pr6$nordose)
+pr6$nor<-0
+pr6$nor[pr6$nordose>0]<-1
+
+## keeping only relevant vasopressor variables
+pr7<-pr6[,c("patientunitstayid","time","nordose","nor","vaso","dopa","epi","phe","patientweight","weight_based")]
+
+# additional cohort selection based on vasopressors
+## restricting to timepoints during before or during admission
+pr8<-left_join(pr7, pt[,c("patientunitstayid","unitdischargeoffset")])
+pr9<-pr8[pr8$time<=pr8$unitdischargeoffset,]
+
+## removing those not started on norepinephrine first
+pr10<-pr9[pr9$nor==1| pr9$vaso==1 | pr9$dopa==1 | pr9$epi==1 | pr9$phe==1,] %>% group_by(patientunitstayid) %>% arrange(time) %>% slice(1L)
+pr11<-pr10[pr10$vaso==0 & pr10$dopa==0 & pr10$epi==0 & pr10$phe==0,]
+pr11$nor_first<-1
+pr11$nor_first_dose<-pr11$nordose
+pr11$nor_first_time<-pr11$time
+pr12<-left_join(pr11[,c("patientunitstayid","nor_first","nor_first_time","nor_first_dose")], pr9[,c("patientunitstayid","time","nordose","nor","vaso","dopa","epi","phe","patientweight","weight_based")])
+pr12$time_from_nor<-pr12$time-pr12$nor_first_time
+pr13<-pr12[pr12$time_from_nor>0,]
+
+## removing patients with norepinephrine doses above 600 mcg/min or greater after conversion (19 patients)
+pr14<-pr13 %>% group_by(patientunitstayid) %>% arrange(desc(nordose)) %>% slice(1L)
+pr15<-pr14[pr14$nordose<600,]
+pr16<-left_join(pr15[,c("patientunitstayid")],pr13)
+pr16$pressor<-1
+
+## joining vasopressor tables with other inclusion criteria
+inc2<-left_join(inc1, pr16)
+inc3<-inc2[!is.na(inc2$pressor),]
+
+######### FOR SENSITIVITY ANALYSIS
+inc1<-inc[!is.na(inc$age_criteria),] 
+nrow(inc1)
+nrow(inc1 %>% group_by(hospitalid) %>% slice(1L))
+inc1$inc<-1
+inc2<-left_join(inc1, pr16)
+inc3<-inc2[!is.na(inc2$pressor),]
+inc3a<-full_join(inc3, abx3)
+inc3a <- inc3a %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(nor_first_time2=na.locf(nor_first_time, na.rm=FALSE))
+inc3a <- inc3a %>% group_by(patientunitstayid) %>% arrange(time) %>% mutate(nor_first_time2=na.locf(nor_first_time, na.rm=FALSE, fromLast=TRUE))
+inc3b<-inc3a[inc3a$time<inc3a$nor_first_time2+4320 & inc3a$time>inc3a$nor_first_time2-4320 & !is.na(inc3a$nor_first_time2),]
+lacmax<-aggregate(lac~patientunitstayid, inc3b, max)
+abxmax<-aggregate(abx~patientunitstayid, inc3b, max)
+lacmax1<-lacmax[lacmax$lac>2,]
+ssthird<-full_join(lacmax1, abxmax)
+ssthird1<-ssthird[!is.na(ssthird$abx) & !is.na(ssthird$lac),] #getting pts with modified sepsis-3 shock def (lactate>2 and abx within 48 hours of first norepinephrine)
+ssthird1$sepsis<-1
+inc2<-left_join(ssthird1[,c("patientunitstayid","sepsis")], pr16)
+inc2<-left_join(inc2, pt)
+inc3<-inc2[!is.na(inc2$pressor),]
+################
+
+# additional cohort selection
+## number of icu stays started on norepi
+nrow(inc3 %>% group_by(patientunitstayid) %>% slice(1L))
+nrow((inc3 %>% group_by(patientunitstayid) %>% slice(1L)) %>% group_by(hospitalid) %>% slice(1L))
+nrow(inc1)-nrow(inc3 %>% group_by(patientunitstayid) %>% slice(1L))##number not started on norepi or started on other pressor first
+
+## removing those started on hydrocortisone or methylpred iv prior to or at same time as norepinephrine
+cort$time<-cort$drugstartoffset
+cort1<-cort[cort$corticosteroid=="hydrocort"|cort$corticosteroid=="methylpred",] %>% group_by(patientunitstayid) %>% arrange(time) %>% slice(1L)
+cort1$cort_time<-cort1$time
+inc4<-left_join(inc3, cort1[,c("patientunitstayid","corticosteroid","cort_time")])
+inc5<-inc4[(is.na(inc4$cort_time)|inc4$cort_time>inc4$nor_first_time) & inc4$nordose>0,]
+inc5$cort_time_from_nor_first_time<-inc5$cort_time-inc5$nor_first_time
+inc5$cort_nordose<-inc5$nordose
+
+
+## number of icu stays after excluding those started on hydrocort prior to norepi
+nrow(inc5 %>% group_by(patientunitstayid) %>% slice(1L))
+nrow(inc5 %>% group_by(hospitalid) %>% slice(1L))
+nrow(inc3 %>% group_by(patientunitstayid) %>% slice(1L))-nrow(inc5 %>% group_by(patientunitstayid) %>% slice(1L)) #number started on hydrocort prior to norepi
+
+## removing multiple icu stays (only keeping random ICU stay per pt) - number of rows in inc6 is number of patients started on norepinephrine
+random<-sample(nrow(inc5))
+inc6<-inc5[random,] %>% group_by(uniquepid)  %>% slice(1L)
+nrow(inc6)
+nrow(inc6 %>% group_by(hospitalid) %>% slice(1L))
+nrow(inc5 %>% group_by(patientunitstayid) %>% slice(1L))-nrow(inc6) #number with multiple icu stays
+
+## converting to long format table
+inc7<- left_join(inc6[,c("patientunitstayid","cort_time","corticosteroid","cort_time_from_nor_first_time","cort_nordose")], inc3)
+
+## creating variables for adjunctive vasopressors
+inc8<-inc7[(inc7$vaso==1|inc7$dopa==1|inc7$epi==1|inc7$phe==1) & inc7$nor==1,] %>% group_by(patientunitstayid) %>% arrange(time) %>% slice(1L)
+inc8$second_pressor_time<-inc8$time
+inc8$second_pressor_nordose<-inc8$nordose
+inc8$second_pressor_type<-"multiple"
+inc8$second_pressor_type[inc8$vaso==1 & inc8$dopa==0 & inc8$epi==0 & inc8$phe==0]<-"vaso"
+inc8$second_pressor_type[inc8$vaso==0 & inc8$dopa==1 & inc8$epi==0 & inc8$phe==0]<-"dopa"
+inc8$second_pressor_type[inc8$vaso==0 & inc8$dopa==0 & inc8$epi==1 & inc8$phe==0]<-"epi"
+inc8$second_pressor_type[inc8$vaso==0 & inc8$dopa==0 & inc8$epi==0 & inc8$phe==1]<-"phe"
+inc8$second_pressor_type<-factor(inc8$second_pressor_type)
+inc8$second_pressor_time_from_nor_first_time<-inc8$second_pressor_time-inc8$nor_first_time
+
+## converting to long format table
+inc9<- left_join(inc7, inc8[,c("patientunitstayid","second_pressor_time","second_pressor_type","second_pressor_time_from_nor_first_time", "second_pressor_nordose")])
+
+## converting to short format table
+inc10<-inc9 %>% group_by(patientunitstayid) %>% arrange(time) %>% slice(1L)
+```
+
+
+## Additional variables
+```{r variables}
+# covariates
+## history of svt
+svt$svt<-1
+inc11<-left_join(inc10, svt)
+inc11$svt[is.na(inc11$svt)]<-0
+
+## history of renal insufficiency
+ri$ri<-1
+inc12<-left_join(inc11,ri[,c("patientunitstayid","ri")])
+inc12$ri[is.na(inc12$ri)]<-0
+
+## apache iv score
+ap1<-ap[!is.na(ap$apachescore) & ap$apachescore>-1,] #removing missing apache scores
+inc13<-left_join(inc12, ap1)
+
+## hospital characteristics
+inc14<-left_join(inc13, ho)
+
+### adding SOFA components to main table
+so2<-left_join(inc14[,c("patientunitstayid","nor_first_time")], sofa)
+### restricting to within 24 hours before nor_first_time
+so3<-so2[so2$time>so2$nor_first_time-1440 & so2$time<=so2$nor_first_time+1440,]
+### worst total sofa score
+so4<-aggregate(total_sofa~patientunitstayid, so3, max)
+so4$nor_first_sofa<-so4$total_sofa
+### adding sofa scores back to main table
+inc15<-left_join(inc14, so4[,c("patientunitstayid","nor_first_sofa")])
+
+### adding io components to main table
+io$time<-io$intakeoutputoffset
+io<-io[,c("patientunitstayid","time","nettotal")]
+io2<-left_join(inc14[,c("patientunitstayid","nor_first_time")], io)
+### restricting to within 48 hours prior to norepinephrine
+io3<-io2[io2$time<=io2$nor_first_time & io2$time>io2$nor_first_time-2880,]
+### sum of ios
+io4<-aggregate(nettotal~patientunitstayid, io3, sum)
+### adding iofa scores back to main table
+inc15<-left_join(inc15, io4[,c("patientunitstayid","nettotal")])
+
+
+## obtaining additional variables 
+### home glucocorticoids 
+precort$precort<-1
+inc15<-left_join(inc15, precort)
+inc15$precort[is.na(inc15$precort)]<-0
+```
+
+## Variable conversion for analysis
+```{r converting variables}
+d<-inc15
+d$gender[d$gender==""]<-NA
+d$gender<-factor(d$gender)
+d$age[d$age=="> 89"]<-90
+d$age<-as.numeric(d$age)
+d$ethnicity[d$ethnicity==""]<-"Other/Unknown"
+d$ethnicity[d$ethnicity=="Asian"]<-"Other/Unknown"
+d$ethnicity[d$ethnicity=="Native American"]<-"Other/Unknown"
+d$ethnicity[is.na(d$ethnicity)]<-"Other/Unknown"
+d$ethnicity[d$ethnicity=="Caucasian"]<-"White"
+d$ethnicity[d$ethnicity=="African American"]<-"Black"
+d$hospitalid<-factor(d$hospitalid)
+d$hospitaldischargestatus[d$hospitaldischargestatus==""]<-NA
+d$hospitaldischargestatus<-factor(d$hospitaldischargestatus)
+d$unittype[d$unittype=="MICU"]<-"aMICU"
+d$unittype[d$unittype=="CTICU"]<-"cardiac_cardiothoracic_cardiac_surgery"
+d$unittype[d$unittype=="CSICU"]<-"cardiac_cardiothoracic_cardiac_surgery"
+d$unittype[d$unittype=="CCU-CTICU"]<-"cardiac_cardiothoracic_cardiac_surgery"
+d$unittype[d$unittype=="Cardiac ICU"]<-"cardiac_cardiothoracic_cardiac_surgery"
+d$unittype<-factor(d$unittype)
+d$region[d$region==""]<-NA
+d$region<-factor(d$region)
+d$teachingstatus<-factor(d$teachingstatus)
+d$second_pressor_type<-factor(d$second_pressor_type, levels=c("vaso","dopa","epi","phe","multiple"))
+d$svt<-factor(d$svt)
+d$ri<-factor(d$ri)
+d$second_pressor_time_from_nor_first_time<-d$second_pressor_time_from_nor_first_time/60
+d$cort_time_from_nor_first_time<-d$cort_time_from_nor_first_time/60
+d$cort_time_from_second_pressor_time<-(d$cort_time-d$second_pressor_time)/60
+d$nor_first_time<-d$nor_first_time/60
+d$cort_type<-NA
+d$cort_type[d$corticosteroid=="hydrocort" & !is.na(d$corticosteroid)]<-"hydrocort"
+d$cort_type[d$corticosteroid=="methylpred" & !is.na(d$corticosteroid)]<-"methylpred"
+d$cort_type<-factor(d$cort_type)
+d$corticosteroid[is.na(d$corticosteroid)]<-0
+d$corticosteroid[d$corticosteroid=="hydrocort"|d$corticosteroid=="methylpred"]<-1
+d$corticosteroid<-factor(as.numeric(d$corticosteroid))
+d$second_pressor<-0
+d$second_pressor[!is.na(d$second_pressor_time)]<-1
+d$second_pressor<-factor(d$second_pressor)
+d$neither<-0
+d$neither[d$second_pressor==0 & d$corticosteroid==0]<-1
+d$both<-0
+d$both[d$second_pressor==1 & d$corticosteroid==1]<-1
+d$second_pressor<-factor(d$second_pressor)
+d$second_treatment<-NA
+d$second_treatment[d$second_pressor==1 & (d$corticosteroid==0 | d$cort_time_from_nor_first_time>=d$second_pressor_time_from_nor_first_time)]<-1
+d$second_treatment[d$corticosteroid==1 & (d$second_pressor==0 | d$cort_time_from_nor_first_time<d$second_pressor_time_from_nor_first_time)]<-0
+d$second_treatment<-factor(d$second_treatment)
+d$precort<-factor(d$precort)
+summary(d$second_treatment)
+d$unitadmitsource[d$unitadmitsource %in% c("Acute Care/Floor","Floor","Observation","Step-Down Unit (SDU)","Chest Pain Center")]<-"floor"
+d$unitadmitsource[d$unitadmitsource %in% c("Direct Admit","Other Hospital")]<-"direct_admit_other_hospital"
+d$unitadmitsource[d$unitadmitsource %in% c("Emergency Department")]<-"emergency"
+d$unitadmitsource[d$unitadmitsource %in% c("ICU","Other ICU")]<-"other_icu"
+d$unitadmitsource[d$unitadmitsource %in% c("Operating Room","PACU","Recovery Room")]<-"operating_room"
+d$unitadmitsource[d$unitadmitsource %in% c("")]<-NA
+d$unitadmitsource<-factor(d$unitadmitsource)
+summary(d$second_pressor)
+summary(d$corticosteroid)
+
+#admissions per hospital
+d$count<-1
+hospcount<-aggregate(count~hospitalid, d, sum)
+hospcount$hospcount<-hospcount$count
+```
+
+
+# Table 1
+```{r table1}
+d1<-left_join(hospcount[hospcount$hospcount>=10,c("hospitalid","hospcount")], d)
+nrow(d1) #number of patients excluded from hospitals with less than 10 patients started on norepinephrine
+nrow(d1 %>% group_by(hospitalid) %>% slice(1L))
+nrow(d1[d1$second_treatment2!=3,] %>% group_by(hospitalid) %>% slice(1L))
+nrow(d)-nrow(d1) #number of patients excluded due to admission to low hospital admissions
+d1$numbedscategory<-factor(d1$numbedscategory, levels=c("100 - 249","<100","250 - 499",">= 500"))
+
+#adding treatment strategy of no adjuncts for table1
+d1$second_treatment2<-as.numeric(d1$second_treatment)
+d1$second_treatment2[is.na(d1$second_treatment2)]<-3
+d1$second_treatment2<-factor(d1$second_treatment2)
+summary(d1$second_treatment2)
+nrow(d1[d1$second_treatment2!=3,] %>% group_by(hospitalid) %>% slice(1L))
+
+#adding albumin use from norepi to adjunct as covariable
+## albumin
+alb$alb<-1
+alb$alb_time<-alb$intakeoutputoffset
+alb1<-left_join(d1, alb[,c("patientunitstayid","alb_time","alb")])
+alb2<-alb1[alb1$alb_time>alb1$nor_first_time & (alb1$alb_time<alb1$cort_time|(alb1$alb_time<alb1$second_pressor_time)) & !is.na(alb1$alb_time) & (!is.na(alb1$second_pressor_time)|!is.na(alb1$cort_time)),]
+alb3<-alb2 %>% group_by(patientunitstayid) %>% arrange(alb_time) %>% slice(1L)
+
+d1<-left_join(d1, alb3[,c("patientunitstayid","alb")])
+d1$alb[is.na(d1$alb)]<-0
+d1$alb<-factor(d1$alb)
+
+d1$weight_based<-factor(d1$weight_based)
+
+# normal vs non-normal evaluation for continious variables
+hist(d1$age)
+hist(d1$apachescore)
+hist(d1$nor_first_sofa)
+hist(d1$second_pressor_nordose)
+hist(d1$cort_nordose)
+hist(d1$second_pressor_time_from_nor_first_time)
+hist(d1$cort_time_from_nor_first_time)
+hist(d1$cort_time_from_second_pressor_time)
+hist(d1$nettotal)
+
+vars <- c("age","gender","ethnicity","region","numbedscategory","teachingstatus","unittype","unitadmitsource","hospitaldischargestatus","svt","ri","apachescore","nor_first_sofa","nor_first_time","precort","cort_type","nettotal","alb","weight_based")
+nonNormalVars <- c("nor_first_time")
+tab1<-CreateTableOne(vars = vars, data = d1, strata="second_treatment2")
+
+# table 1
+print(tab1, smd=FALSE, nonnormal = nonNormalVars, noSpaces = TRUE)
+
+# missingness per variable
+summary(tab1)
+
+#hospital volume averages
+hospcount2<-aggregate(count~hospitalid, d1[d1$second_treatment2!=3,], sum)
+hospcount3<-unique(hospcount2$count)
+summary(hospcount3)
+nrow(hospcount2)
+
+```
+
+
+
+
+
+# Missing Data
+```{r missing}
+# adjunctive/second vasopressor dataset for norepinephrine dose
+s<-d1[d1$second_pressor==1 & (is.na(d1$cort_time)|d1$cort_time_from_nor_first_time>d1$second_pressor_time_from_nor_first_time),c("age","gender","ethnicity","region","numbedscategory","teachingstatus","unittype","hospitaldischargestatus","svt","ri","apachescore","second_pressor_type","nor_first_sofa","second_pressor_time_from_nor_first_time","second_pressor_nordose","precort","nettotal","hospitalid","alb","weight_based")]
+s$count<-1 #count for later hospital n
+
+# corticosteroid dataset for norepinephrine dose
+c<-d1[d1$corticosteroid==1 & (is.na(d1$second_pressor_time)|d1$second_pressor_time_from_nor_first_time>d1$cort_time_from_nor_first_time),c("age","gender","ethnicity","region","numbedscategory","teachingstatus","unittype","hospitaldischargestatus","svt","ri","apachescore","nor_first_sofa","cort_time_from_nor_first_time","cort_nordose","precort","cort_type","nettotal","hospitalid","alb","weight_based")]
+c$count<-1 #count for later hospital n
+
+# corticosteroid dataset excluding patients administered previous corticosteroids for norepinephrine (sensitivity analysis dataset)
+cnoprior<-d1[d1$corticosteroid==1 & (is.na(d1$second_pressor_time)|d1$second_pressor_time_from_nor_first_time>d1$cort_time_from_nor_first_time) & d1$precort==0,c("age","gender","ethnicity","region","numbedscategory","teachingstatus","unittype","hospitaldischargestatus","svt","ri","apachescore","nor_first_sofa","cort_time_from_nor_first_time","cort_nordose","precort","cort_type","nettotal","hospitalid","alb","weight_based")]
+cnoprior$count<-1 #count for later hospital n
+
+# adjunctive vasopressors and corticosteroid combined dataset for treatment strategy
+b<- d1[!is.na(d1$second_treatment),c("age","gender","ethnicity","region","numbedscategory","teachingstatus","unittype","hospitaldischargestatus","svt","ri","apachescore","nor_first_sofa","precort","nettotal","second_treatment","hospitalid","alb","weight_based")]
+
+## number of included hospitals in combined dataset
+nrow(as.matrix(table(b$hospitalid)))
+
+# missing Data Visualization
+missing_plot_s<-aggr(s, numbers=TRUE, sortVars=TRUE, ylab=c("Proportion of Missing Data","Pattern of Missing Data"), gap=1, digits=2, prop=FALSE, cex.axis=0.5)
+missing_plot_c<-aggr(c, numbers=TRUE, sortVars=TRUE, ylab=c("Proportion of Missing Data","Pattern of Missing Data"), gap=1, digits=2, prop=FALSE, cex.axis=0.5)
+missing_plot_cnoprior<-aggr(cnoprior, numbers=TRUE, sortVars=TRUE, ylab=c("Proportion of Missing Data","Pattern of Missing Data"), gap=1, digits=2, prop=FALSE, cex.axis=0.5)
+missing_plot_b<-aggr(b, numbers=TRUE, sortVars=TRUE, ylab=c("Proportion of Missing Data","Pattern of Missing Data"), gap=1, digits=2, prop=FALSE, cex.axis=0.5)
+
+# setting number of datasets to impute
+ms<-20
+mc<-20
+mcnoprior<-20
+mb<-20
+
+# imputing with 20 datasets
+is<-mice(s, m=ms)
+ic<-mice(c, m=mc)
+icnoprior<-mice(cnoprior, m=mc)
+ib<-mice(b, m=mb)
+
+# visualizing distribution of imputed continuous variables
+densityplot(is)
+densityplot(ic)
+densityplot(icnoprior)
+densityplot(ib)
+```
+
+# Crude outcomes/proportions analysis
+```{r crude}
+#range of norepinephrine doses among patients not started on an adjunct
+range_no_adjunct<-aggregate(nordose~patientunitstayid, nor[nor$nordose<600 & nor$nordose>=1,], max)
+range_no_adjunct$max_nor<-range_no_adjunct$nordose
+range_no_adjunct1<-left_join(d1[d1$second_treatment2==3,], range_no_adjunct[,c("patientunitstayid","max_nor")])
+
+summary(range_no_adjunct1$max_nor)
+
+#percent of patients started on an adjunct by hospital
+percent_adjunct<-as.data.frame(prop.table(table(d1$hospitalid, d1$second_treatment2==3),1))
+percent_adjunct<-percent_adjunct[percent_adjunct$Var2==FALSE & !is.na(percent_adjunct$Freq),]
+round(max(percent_adjunct$Freq)*100,1)
+round(min(percent_adjunct$Freq)*100,1)
+round(median(percent_adjunct$Freq)*100,1)
+round(quantile(percent_adjunct$Freq,0.25)*100,1)
+round(quantile(percent_adjunct$Freq,0.75)*100,1)
+
+#n of corticosteroid and second vasopressor
+nrow(d1[d1$second_pressor==1 & d1$corticosteroid==0,])
+nrow(d1[d1$second_pressor==0 & d1$corticosteroid==1,])
+nrow(d1[d1$second_pressor==1 & d1$corticosteroid==1,])
+
+# adjunctive/second vasopressor
+## second vasopressor rate
+table(d1$second_pressor)
+prop.table(table(d1$second_pressor))
+
+## second vasopressor rate before corticosteroid or no corticosteroid 
+table(d1$second_pressor[d1$second_treatment==1|is.na(d1$second_treatment)])
+prop.table(table(d1$second_pressor[d1$second_treatment==1|is.na(d1$second_treatment)]))
+
+## second vasopressor rate 95% CI
+crude_prop_second_pressor<-binom.test(table(d1$second_pressor)[2],table(d1$second_pressor)[2]+table(d1$second_pressor)[1])
+c(round(crude_prop_second_pressor$estimate,2), round(crude_prop_second_pressor$conf.int,2))
+
+## second vasopressor norepinephrine dose 95% CI
+d2<-d1[d1$second_treatment==1 & !is.na(d1$second_treatment),]
+nds<-groupwiseMedian(second_pressor_nordose~1, data=d2, bca=FALSE, basic=TRUE)
+nds
+summary(d2$second_pressor_nordose)
+
+## second vasopressor time from norepinephrine initiation and 95% CI
+st<-groupwiseMedian(second_pressor_time_from_nor_first_time~1, data=d2, bca=FALSE, basic=TRUE)
+st
+
+## second vasopressor type
+table(d2$second_pressor_type)
+prop.table(table(d2$second_pressor_type))
+
+
+# corticosteroid
+## corticosteroid rate
+table(d1$corticosteroid)
+prop.table(table(d1$corticosteroid))
+
+## corticosteroid rate before second vasopressor or no second vasopressor
+table(d1$corticosteroid[d1$second_treatment==0|is.na(d1$second_treatment)])
+prop.table(table(d1$corticosteroid[d1$second_treatment==0|is.na(d1$second_treatment)]))
+
+## corticosteroid rate 95% CI
+crude_prop_cort<-binom.test(table(d1$corticosteroid)[2],table(d1$corticosteroid)[2]+table(d1$corticosteroid)[1])
+c(round(crude_prop_cort$estimate,2), round(crude_prop_cort$conf.int,2))
+
+## corticosteroid norepinephrine dose 95% CI
+d3<-d1[d1$second_treatment==0 & !is.na(d1$second_treatment),]
+ndc<-groupwiseMedian(cort_nordose~1, data=d3, bca=FALSE, basic=TRUE)
+ndc
+summary(d3$cort_nordose)
+
+## corticosteroid norepinephrine dose 95% CI excluding those on glucocorticoids prior to ICU admission
+d3exc<-d1[(d1$second_treatment==0 & !is.na(d1$second_treatment)) & d1$precort==0,]
+ndc_exc<-groupwiseMedian(cort_nordose~1, data=d3exc, bca=FALSE, basic=TRUE)
+ndc_exc
+
+## corticosteroid time from norepinephrine initiation and 95% CI
+ct<-groupwiseMedian(cort_time_from_nor_first_time~1, data=d3, bca=FALSE, basic=TRUE)
+ct
+
+## neither
+crude_prop_neither<-binom.test(table(d1$neither)[2],table(d1$neither)[2]+table(d1$neither)[1])
+c(round(crude_prop_neither$estimate,2), round(crude_prop_neither$conf.int,2))
+
+## both
+table(d1$both)[2]
+crude_prop_both<-binom.test(table(d1$both)[2],table(d1$both)[2]+table(d1$both)[1])
+c(round(crude_prop_both$estimate,2), round(crude_prop_both$conf.int,2))
+
+# among patients on both, started on pressor before corticosteroid or visa versa
+d4<-d1[d1$both==1,]
+d4$second_pressor_before_cort<-0
+d4$second_pressor_before_cort[d4$cort_time_from_second_pressor_time>0]<-1
+table(d4$second_pressor_before_cort)
+prop.table(table(d4$second_pressor_before_cort))
+
+d4$cort_before_second_pressor<-0
+d4$cort_before_second_pressor[d4$cort_time_from_second_pressor_time<0]<-1
+table(d4$cort_before_second_pressor)
+prop.table(table(d4$cort_before_second_pressor))
+
+d4$second_pressor_and_cort<-0
+d4$second_pressor_and_cort[d4$cort_time_from_second_pressor_time==0]<-1
+table(d4$second_pressor_and_cort)
+prop.table(table(d4$second_pressor_and_cort))
+
+#time between vasopressors and corticosteroids
+d4$vaso_to_cort_time<-(d4$cort_time-d4$second_pressor_time)/60
+tvc<-groupwiseMedian(vaso_to_cort_time~1, data=d4, bca=FALSE, basic=TRUE)
+tvc
+
+#proportion of patients started on both within 1 hr
+
+prop.table(table(d4$vaso_to_cort_time<1))
+prop.test(table(d4$vaso_to_cort_time<1))
+1-0.51691
+1-0.62199
+
+crude_prop_second_pressor_before_cort<-binom.test(table(d4$second_pressor_before_cort)[2],table(d4$second_pressor_before_cort)[2]+table(d4$second_pressor_before_cort)[1])
+c(round(crude_prop_second_pressor_before_cort$estimate,2), round(crude_prop_second_pressor_before_cort$conf.int,2))
+table(d4$second_pressor_before_cort, d4$second_pressor_type)
+
+# among patients started on both, time from second vasopressor to corticosteroid and time from corticosteroid to second pressor
+spct<-groupwiseMedian(cort_time_from_second_pressor_time~1, data=d4[d4$second_pressor_before_cort==1,], bca=FALSE, basic=TRUE)
+spct
+
+ctsp<-groupwiseMedian(cort_time_from_second_pressor_time~1, data=d4[d4$second_pressor_before_cort==0,], bca=FALSE, basic=TRUE)
+ctsp
+
+#type of corticosteroid in those with corticosteroids first
+table(c$cort_type)
+prop.table(table(c$cort_type))
+```
+
+# Models for adjunctive/second vasopressor norepinephrine dose
+```{r models_secondpressor}
+# models (just hospital random intercept, hospital factors, all factors)
+mod_uni<-with(is, lmer(log(second_pressor_nordose)~(1|hospitalid)))
+mod_uni_pool<-pool(mod_uni)
+
+mod_hosp<-with(is, lmer(log(second_pressor_nordose)~region+numbedscategory+teachingstatus+(1|hospitalid)))
+mod_hosp_pool<-pool(mod_hosp)
+
+mod_all<-with(is, lmer(log(second_pressor_nordose)~scale(age)+gender+ethnicity+region+numbedscategory+teachingstatus+unittype+svt+ri+scale(apachescore)+scale(nor_first_sofa)+precort+scale(nettotal)+alb+weight_based+(1|hospitalid)))
+mod_all_pool<-pool(mod_all)
+
+# fixed effect estimates 
+fix_uni<-summary(mod_uni_pool, conf.int=TRUE)
+fix_hosp<-summary(mod_hosp_pool, conf.int=TRUE)
+fix_all<-summary(mod_all_pool, conf.int=TRUE)
+
+# predicted norepinephrine doses 
+pred_uni = list()
+for (j in 1:ms) {
+ pred_uni[[j]]<- (pred_lmer(mod_uni, j))
+}
+
+pred_hosp = list()
+for (j in 1:ms) {
+ pred_hosp[[j]]<- (pred_lmer(mod_hosp, j))
+}
+
+pred_all = list()
+for (j in 1:ms) {
+ pred_all[[j]]<- (pred_lmer(mod_all, j))
+}
+
+pred_uni<-rowMeans(data.frame(pred_uni))
+pred_hosp<-rowMeans(data.frame(pred_hosp))
+pred_all<-rowMeans(data.frame(pred_all))
+
+s1<-cbind(s,pred_uni,pred_hosp,pred_all) %>% rename(pred_uni=ncol(s)+1, pred_hosp=ncol(s)+2, pred_all=ncol(s)+3)
+
+# icc
+icc_uni = list()
+for (j in 1:ms) {
+ icc_uni[[j]]<- performance::icc(getfit(mod_uni, j))
+}
+
+icc_hosp = list()
+for (j in 1:ms) {
+ icc_hosp[[j]]<- performance::icc(getfit(mod_hosp, j))
+}
+
+icc_all = list()
+for (j in 1:ms) {
+ icc_all[[j]]<- performance::icc(getfit(mod_all, j))
+}
+
+icc_uni<-data.frame(matrix(unlist(icc_uni), nrow=length(icc_hosp), byrow=T)) %>% rename(adjusted=X1, conditional=X2)
+
+icc_hosp<-data.frame(matrix(unlist(icc_hosp), nrow=length(icc_hosp), byrow=T)) %>% rename(adjusted=X1, conditional=X2)
+
+icc_all<-data.frame(matrix(unlist(icc_all), nrow=length(icc_all), byrow=T)) %>% rename(adjusted=X1, conditional=X2)
+
+```
+
+# Models for adjunctive/second vasopressor norepinephrine dose - output
+```{r modeloutput_secondpressor}
+# fixed effect estimates
+output_all_sp<-data.frame(cbind(as.character(fix_all$term), round(fix_all$estimate,3), round(fix_all$`2.5 %`,3), round(fix_all$`97.5 %`,3), round(fix_all$p.value,3))) %>% rename(term=1, beta=2, lower=3, upper=4, p_value=5)
+write.csv(output_all_sp, "output_all_sp.csv")
+
+# icc
+mean(icc_uni$adjusted)
+mean(icc_uni$conditional)
+mean(icc_hosp$adjusted)
+mean(icc_hosp$conditional)
+mean(icc_all$adjusted)
+mean(icc_all$conditional)
+
+# mean and 95% CI for fully adjusted adjusted icc
+icc_all_mean<-mean(icc_all$adjusted)
+icc_all_se<-sd(icc_all$adjusted)/sqrt(nrow(icc_all))
+icc_all_upper<-icc_all_mean+1.96*icc_all_se
+icc_all_lower<-icc_all_mean-1.96*icc_all_se
+c(round(icc_all_mean,3), round(icc_all_lower,3), round(icc_all_upper,3))*100
+
+# predicted norepinephrine doses
+## fully adjusted model
+hm<-aggregate(pred_all~hospitalid, s1, mean)
+hm$hosp_mean<-hm$pred_all
+hs<-aggregate(pred_all~hospitalid, s1, sd)
+hs$hosp_sd<-hs$pred_all
+hp<-full_join(hm[,c("hospitalid","hosp_mean")], hs[,c("hospitalid","hosp_sd")])
+n_hosp<-aggregate(count~hospitalid, s1, sum)
+hp1<-left_join(hp, n_hosp)
+hp1$lower<-hp1$hosp_mean-(1.96*(hp1$hosp_sd/sqrt(hp1$count)))
+hp1$upper<-hp1$hosp_mean+(1.96*(hp1$hosp_sd/sqrt(hp1$count)))
+hp3<-hp1
+hp3_exp<-hp3
+hp3_exp$hosp_mean<-exp(hp3_exp$hosp_mean)
+hp3_exp$lower<-exp(hp3_exp$lower)
+hp3_exp$upper<-exp(hp3_exp$upper)
+
+# fig 1
+fig1<-ggplot(hp3, aes(x=reorder(hospitalid, exp(hosp_mean)), y=exp(hosp_mean)))+
+  geom_point(aes(size=count))+
+  geom_errorbar(aes(ymin = exp(lower), ymax = exp(upper)), width = 0.2)+
+  theme(legend.position = "none",
+        axis.text.x=element_blank())+
+  labs(x="Hospital",y="Case mix-adjusted norepinephrine dose (mcg/min)")
+fig1
+
+ggsave("fig1.tiff")
+```
+
+# Models for corticosteroid norepinephrine dose
+```{r models_corticosteroids}
+# models (just hospital random intercept, hospital factors, all factors)
+mod_uni<-with(ic, lmer(log(cort_nordose)~(1|hospitalid)))
+mod_uni_pool<-pool(mod_uni)
+
+mod_hosp<-with(ic, lmer(log(cort_nordose)~region+numbedscategory+teachingstatus+(1|hospitalid)))
+mod_hosp_pool<-pool(mod_hosp)
+
+mod_all<-with(ic, lmer(log(cort_nordose)~scale(age)+gender+ethnicity+region+numbedscategory+teachingstatus+unittype+svt+ri+scale(apachescore)+scale(nor_first_sofa)+precort+scale(nettotal)+alb+weight_based+(1|hospitalid)))
+mod_all_pool<-pool(mod_all)
+
+# fixed effect estimates 
+fix_uni<-summary(mod_uni_pool, conf.int=TRUE)
+fix_hosp<-summary(mod_hosp_pool, conf.int=TRUE)
+fix_all<-summary(mod_all_pool, conf.int=TRUE)
+
+# predicted norepinephrine doses 
+pred_uni = list()
+for (j in 1:mc) {
+ pred_uni[[j]]<- (pred_lmer(mod_uni, j))
+}
+
+pred_hosp = list()
+for (j in 1:mc) {
+ pred_hosp[[j]]<- (pred_lmer(mod_hosp, j))
+}
+
+pred_all = list()
+for (j in 1:mc) {
+ pred_all[[j]]<- (pred_lmer(mod_all, j))
+}
+
+pred_uni<-rowMeans(data.frame(pred_uni))
+pred_hosp<-rowMeans(data.frame(pred_hosp))
+pred_all<-rowMeans(data.frame(pred_all))
+
+c1<-cbind(c,pred_uni,pred_hosp,pred_all) %>% rename(pred_uni=ncol(c)+1, pred_hosp=ncol(c)+2, pred_all=ncol(c)+3)
+
+# icc
+icc_uni = list()
+for (j in 1:mc) {
+ icc_uni[[j]]<- performance::icc(getfit(mod_uni, j))
+}
+
+icc_hosp = list()
+for (j in 1:mc) {
+ icc_hosp[[j]]<- performance::icc(getfit(mod_hosp, j))
+}
+
+icc_all = list()
+for (j in 1:mc) {
+ icc_all[[j]]<- performance::icc(getfit(mod_all, j))
+}
+
+icc_uni<-data.frame(matrix(unlist(icc_uni), nrow=length(icc_hosp), byrow=T)) %>% rename(adjusted=X1, conditional=X2)
+
+icc_hosp<-data.frame(matrix(unlist(icc_hosp), nrow=length(icc_hosp), byrow=T)) %>% rename(adjusted=X1, conditional=X2)
+
+icc_all<-data.frame(matrix(unlist(icc_all), nrow=length(icc_all), byrow=T)) %>% rename(adjusted=X1, conditional=X2)
+```
+
+# Models for corticosteroids norepinephrine dose - output
+```{r modeloutput_corticosteroids}
+# fixed effect estimates
+output_all_c<-data.frame(cbind(as.character(fix_all$term), round(fix_all$estimate,3), round(fix_all$`2.5 %`,3), round(fix_all$`97.5 %`,3), round(fix_all$p.value,3))) %>% rename(term=1, beta=2, lower=3, upper=4, p_value=5)
+write.csv(output_all_c, "output_all_c.csv")
+
+# icc
+mean(icc_uni$adjusted)
+mean(icc_uni$conditional)
+mean(icc_hosp$adjusted)
+mean(icc_hosp$conditional)
+mean(icc_all$adjusted)
+mean(icc_all$conditional)
+
+#mean and CI for fully adjusted adjusted icc (removed one hospital with singular fit)
+icc_all<-icc_all[!is.na(icc_all$adjusted),]
+icc_all_mean<-mean(icc_all$adjusted)
+icc_all_se<-sd(icc_all$adjusted)/sqrt(nrow(icc_all))
+icc_all_upper<-icc_all_mean+1.96*icc_all_se
+icc_all_lower<-icc_all_mean-1.96*icc_all_se
+c(round(icc_all_mean,3), round(icc_all_lower,3), round(icc_all_upper,3))*100
+
+# predicted norepinephrine doses
+## fully adjusted model
+hm<-aggregate(pred_all~hospitalid, c1, mean)
+hm$hosp_mean<-hm$pred_all
+hs<-aggregate(pred_all~hospitalid, c1, sd)
+hs$hosp_sd<-hs$pred_all
+hp<-full_join(hm[,c("hospitalid","hosp_mean")], hs[,c("hospitalid","hosp_sd")])
+n_hosp<-aggregate(count~hospitalid, c1, sum)
+hp1<-left_join(hp, n_hosp)
+hp1$lower<-hp1$hosp_mean-(1.96*(hp1$hosp_sd/sqrt(hp1$count)))
+hp1$upper<-hp1$hosp_mean+(1.96*(hp1$hosp_sd/sqrt(hp1$count)))
+hp2<-hp1
+hp2_exp<-hp2
+hp2_exp$hosp_mean<-exp(hp2_exp$hosp_mean)
+hp2_exp$lower<-exp(hp2_exp$lower)
+hp2_exp$upper<-exp(hp2_exp$upper)
+
+#fig 2
+fig2<-ggplot(hp2, aes(x=reorder(hospitalid, exp(hosp_mean)), y=exp(hosp_mean)))+
+  geom_point(aes(size=count))+
+  geom_errorbar(aes(ymin = exp(lower), ymax = exp(upper)), width = 0.2)+
+  theme(legend.position = "none",
+        axis.text.x=element_blank())+
+  labs(x="Hospital",y="Case mix-adjusted norepinephrine dose (mcg/min)")
+fig2
+
+ggsave("fig2.tiff")
+```
+# correlation between risk adjusted average hospital norepinephrine dose for additional vasopresors and for corticosteroids
+```{r correlation}
+hp2$cortnor<-exp(hp2$hosp_mean)
+hp3$pressnor<-exp(hp3$hosp_mean)
+hp4<-inner_join(hp2[,c("hospitalid","cortnor")], hp3[,c("hospitalid","pressnor")])
+
+hist(hp4$pressnor)
+hist(hp4$cortnor)
+plot(hp4$pressnor,hp4$cortnor)
+round(SpearmanRho(hp4$pressnor, y = hp4$cortnor, use = c("everything", "all.obs", "complete.obs", 
+            "na.or.complete","pairwise.complete.obs"), conf.level=0.95),2)
+```
+
+# Models for treatment strategy
+```{r models_second_treatment_strategy}
+# models (just hospital random intercept, hospital factors, all factors)
+mod_uni<-with(ib, glmer(second_treatment~(1|hospitalid), family="binomial"))
+mod_uni_pool<-pool(mod_uni)
+
+mod_hosp<-with(ib, glmer(second_treatment~region+numbedscategory+teachingstatus+(1|hospitalid), family="binomial" ,control=glmerControl(optimizer="bobyqa",optCtrl=list(maxfun=2e7))))
+mod_hosp_pool<-pool(mod_hosp)
+
+mod_all<-with(ib, glmer(second_treatment~scale(age)+gender+ethnicity+region+numbedscategory+teachingstatus+unittype+svt+ri+scale(apachescore)+scale(nor_first_sofa)+precort+scale(nettotal)+alb+weight_based+(1|hospitalid), family="binomial", control=glmerControl(optimizer="bobyqa",optCtrl=list(maxfun=2e7))))
+mod_all_pool<-pool(mod_all)
+
+# fixed efffect estimates
+fix_uni<-summary(mod_uni_pool, conf.int=TRUE, exponentiate=T)
+fix_hosp<-summary(mod_hosp_pool, conf.int=TRUE, exponentiate=T)
+fix_all<-summary(mod_all_pool, conf.int=TRUE, exponentiate=T)
+
+# Median odds ratio - https://stats.stackexchange.com/questions/32239/how-to-implement-credible-95-interval-for-median-odds-ratio-using-jags
+a<-glmerModList(second_treatment~scale(age)+gender+ethnicity+region+numbedscategory+teachingstatus+unittype+svt+ri+scale(apachescore)+scale(nor_first_sofa)+precort+scale(nettotal)+alb+weight_based+(1|hospitalid), data=complete(ib, action="all"), family="binomial", control=glmerControl(optimizer="bobyqa",optCtrl=list(maxfun=2e7)))
+
+t<- ranef(a$`1`,condVar = TRUE)
+est<-as.numeric(unlist(t$hospitalid))
+var<- as.numeric(unlist(attr(t$hospitalid,"postVar")))
+### bootstrap 
+mor_boot<- c()
+#### iterate over replicates
+for(i in 1:1000){
+### draw vector of area random effects from normal
+drw<- rnorm(n = length(est),mean = est,sd = sqrt(var))
+### create data frame with all possible pairs 
+s<- combn(drw,2)
+#### estimate MOR and save in output
+mor_boot<- c(mor_boot, median(exp(abs(s[1,]- s[2,]))))
+}
+### bootstrap median and 95% CI
+mor1<-quantile(mor_boot, c(.025,.5,.975))
+
+for(i in 1:mb){t[i]<-ranef(a[[i]],condVar = TRUE)}
+
+## Booting MORS
+t<- ranef(a$`1`,condVar = TRUE)
+est<-as.numeric(unlist(t$hospitalid))
+var<- as.numeric(unlist(attr(t$hospitalid,"postVar")))
+mor_boot<- c()
+for(i in 1:1000){
+drw<- rnorm(n = length(est),mean = est,sd = sqrt(var))
+s<- combn(drw,2)
+mor_boot<- c(mor_boot, median(exp(abs(s[1,]- s[2,]))))}
+mor1<-quantile(mor_boot, c(.025,.5,.975))
+
+t<- ranef(a$`2`,condVar = TRUE)
+est<-as.numeric(unlist(t$hospitalid))
+var<- as.numeric(unlist(attr(t$hospitalid,"postVar")))
+mor_boot<- c()
+for(i in 1:1000){
+drw<- rnorm(n = length(est),mean = est,sd = sqrt(var))
+s<- combn(drw,2)
+mor_boot<- c(mor_boot, median(exp(abs(s[1,]- s[2,]))))}
+mor2<-quantile(mor_boot, c(.025,.5,.975))
+
+t<- ranef(a$`3`,condVar = TRUE)
+est<-as.numeric(unlist(t$hospitalid))
+var<- as.numeric(unlist(attr(t$hospitalid,"postVar")))
+mor_boot<- c()
+for(i in 1:1000){
+drw<- rnorm(n = length(est),mean = est,sd = sqrt(var))
+s<- combn(drw,2)
+mor_boot<- c(mor_boot, median(exp(abs(s[1,]- s[2,]))))}
+mor3<-quantile(mor_boot, c(.025,.5,.975))
+
+t<- ranef(a$`4`,condVar = TRUE)
+est<-as.numeric(unlist(t$hospitalid))
+var<- as.numeric(unlist(attr(t$hospitalid,"postVar")))
+mor_boot<- c()
+for(i in 1:1000){
+drw<- rnorm(n = length(est),mean = est,sd = sqrt(var))
+s<- combn(drw,2)
+mor_boot<- c(mor_boot, median(exp(abs(s[1,]- s[2,]))))}
+mor4<-quantile(mor_boot, c(.025,.5,.975))
+
+t<- ranef(a$`5`,condVar = TRUE)
+est<-as.numeric(unlist(t$hospitalid))
+var<- as.numeric(unlist(attr(t$hospitalid,"postVar")))
+mor_boot<- c()
+for(i in 1:1000){
+drw<- rnorm(n = length(est),mean = est,sd = sqrt(var))
+s<- combn(drw,2)
+mor_boot<- c(mor_boot, median(exp(abs(s[1,]- s[2,]))))}
+mor5<-quantile(mor_boot, c(.025,.5,.975))
+
+t<- ranef(a$`6`,condVar = TRUE)
+est<-as.numeric(unlist(t$hospitalid))
+var<- as.numeric(unlist(attr(t$hospitalid,"postVar")))
+mor_boot<- c()
+for(i in 1:1000){
+drw<- rnorm(n = length(est),mean = est,sd = sqrt(var))
+s<- combn(drw,2)
+mor_boot<- c(mor_boot, median(exp(abs(s[1,]- s[2,]))))}
+mor6<-quantile(mor_boot, c(.025,.5,.975))
+
+t<- ranef(a$`7`,condVar = TRUE)
+est<-as.numeric(unlist(t$hospitalid))
+var<- as.numeric(unlist(attr(t$hospitalid,"postVar")))
+mor_boot<- c()
+for(i in 1:1000){
+drw<- rnorm(n = length(est),mean = est,sd = sqrt(var))
+s<- combn(drw,2)
+mor_boot<- c(mor_boot, median(exp(abs(s[1,]- s[2,]))))}
+mor7<-quantile(mor_boot, c(.025,.5,.975))
+
+t<- ranef(a$`8`,condVar = TRUE)
+est<-as.numeric(unlist(t$hospitalid))
+var<- as.numeric(unlist(attr(t$hospitalid,"postVar")))
+mor_boot<- c()
+for(i in 1:1000){
+drw<- rnorm(n = length(est),mean = est,sd = sqrt(var))
+s<- combn(drw,2)
+mor_boot<- c(mor_boot, median(exp(abs(s[1,]- s[2,]))))}
+mor8<-quantile(mor_boot, c(.025,.5,.975))
+
+t<- ranef(a$`9`,condVar = TRUE)
+est<-as.numeric(unlist(t$hospitalid))
+var<- as.numeric(unlist(attr(t$hospitalid,"postVar")))
+mor_boot<- c()
+for(i in 1:1000){
+drw<- rnorm(n = length(est),mean = est,sd = sqrt(var))
+s<- combn(drw,2)
+mor_boot<- c(mor_boot, median(exp(abs(s[1,]- s[2,]))))}
+mor9<-quantile(mor_boot, c(.025,.5,.975))
+
+t<- ranef(a$`10`,condVar = TRUE)
+est<-as.numeric(unlist(t$hospitalid))
+var<- as.numeric(unlist(attr(t$hospitalid,"postVar")))
+mor_boot<- c()
+for(i in 1:1000){
+drw<- rnorm(n = length(est),mean = est,sd = sqrt(var))
+s<- combn(drw,2)
+mor_boot<- c(mor_boot, median(exp(abs(s[1,]- s[2,]))))}
+mor10<-quantile(mor_boot, c(.025,.5,.975))
+
+t<- ranef(a$`11`,condVar = TRUE)
+est<-as.numeric(unlist(t$hospitalid))
+var<- as.numeric(unlist(attr(t$hospitalid,"postVar")))
+mor_boot<- c()
+for(i in 1:1000){
+drw<- rnorm(n = length(est),mean = est,sd = sqrt(var))
+s<- combn(drw,2)
+mor_boot<- c(mor_boot, median(exp(abs(s[1,]- s[2,]))))}
+mor11<-quantile(mor_boot, c(.025,.5,.975))
+
+t<- ranef(a$`12`,condVar = TRUE)
+est<-as.numeric(unlist(t$hospitalid))
+var<- as.numeric(unlist(attr(t$hospitalid,"postVar")))
+mor_boot<- c()
+for(i in 1:1000){
+drw<- rnorm(n = length(est),mean = est,sd = sqrt(var))
+s<- combn(drw,2)
+mor_boot<- c(mor_boot, median(exp(abs(s[1,]- s[2,]))))}
+mor12<-quantile(mor_boot, c(.025,.5,.975))
+
+t<- ranef(a$`13`,condVar = TRUE)
+est<-as.numeric(unlist(t$hospitalid))
+var<- as.numeric(unlist(attr(t$hospitalid,"postVar")))
+mor_boot<- c()
+for(i in 1:1000){
+drw<- rnorm(n = length(est),mean = est,sd = sqrt(var))
+s<- combn(drw,2)
+mor_boot<- c(mor_boot, median(exp(abs(s[1,]- s[2,]))))}
+mor13<-quantile(mor_boot, c(.025,.5,.975))
+
+t<- ranef(a$`14`,condVar = TRUE)
+est<-as.numeric(unlist(t$hospitalid))
+var<- as.numeric(unlist(attr(t$hospitalid,"postVar")))
+mor_boot<- c()
+for(i in 1:1000){
+drw<- rnorm(n = length(est),mean = est,sd = sqrt(var))
+s<- combn(drw,2)
+mor_boot<- c(mor_boot, median(exp(abs(s[1,]- s[2,]))))}
+mor14<-quantile(mor_boot, c(.025,.5,.975))
+
+t<- ranef(a$`15`,condVar = TRUE)
+est<-as.numeric(unlist(t$hospitalid))
+var<- as.numeric(unlist(attr(t$hospitalid,"postVar")))
+mor_boot<- c()
+for(i in 1:1000){
+drw<- rnorm(n = length(est),mean = est,sd = sqrt(var))
+s<- combn(drw,2)
+mor_boot<- c(mor_boot, median(exp(abs(s[1,]- s[2,]))))}
+mor15<-quantile(mor_boot, c(.025,.5,.975))
+
+t<- ranef(a$`16`,condVar = TRUE)
+est<-as.numeric(unlist(t$hospitalid))
+var<- as.numeric(unlist(attr(t$hospitalid,"postVar")))
+mor_boot<- c()
+for(i in 1:1000){
+drw<- rnorm(n = length(est),mean = est,sd = sqrt(var))
+s<- combn(drw,2)
+mor_boot<- c(mor_boot, median(exp(abs(s[1,]- s[2,]))))}
+mor16<-quantile(mor_boot, c(.025,.5,.975))
+
+t<- ranef(a$`17`,condVar = TRUE)
+est<-as.numeric(unlist(t$hospitalid))
+var<- as.numeric(unlist(attr(t$hospitalid,"postVar")))
+mor_boot<- c()
+for(i in 1:1000){
+drw<- rnorm(n = length(est),mean = est,sd = sqrt(var))
+s<- combn(drw,2)
+mor_boot<- c(mor_boot, median(exp(abs(s[1,]- s[2,]))))}
+mor17<-quantile(mor_boot, c(.025,.5,.975))
+
+t<- ranef(a$`18`,condVar = TRUE)
+est<-as.numeric(unlist(t$hospitalid))
+var<- as.numeric(unlist(attr(t$hospitalid,"postVar")))
+mor_boot<- c()
+for(i in 1:1000){
+drw<- rnorm(n = length(est),mean = est,sd = sqrt(var))
+s<- combn(drw,2)
+mor_boot<- c(mor_boot, median(exp(abs(s[1,]- s[2,]))))}
+mor18<-quantile(mor_boot, c(.025,.5,.975))
+
+t<- ranef(a$`19`,condVar = TRUE)
+est<-as.numeric(unlist(t$hospitalid))
+var<- as.numeric(unlist(attr(t$hospitalid,"postVar")))
+mor_boot<- c()
+for(i in 1:1000){
+drw<- rnorm(n = length(est),mean = est,sd = sqrt(var))
+s<- combn(drw,2)
+mor_boot<- c(mor_boot, median(exp(abs(s[1,]- s[2,]))))}
+mor19<-quantile(mor_boot, c(.025,.5,.975))
+
+t<- ranef(a$`20`,condVar = TRUE)
+est<-as.numeric(unlist(t$hospitalid))
+var<- as.numeric(unlist(attr(t$hospitalid,"postVar")))
+mor_boot<- c()
+for(i in 1:1000){
+drw<- rnorm(n = length(est),mean = est,sd = sqrt(var))
+s<- combn(drw,2)
+mor_boot<- c(mor_boot, median(exp(abs(s[1,]- s[2,]))))}
+mor20<-quantile(mor_boot, c(.025,.5,.975))
+
+morall<-as.data.frame(rbind(mor1,mor2,mor3,mor4,mor5,mor6,mor7,mor8,mor9,mor10,mor11,mor12,mor13,mor14,mor15,mor16,mor17,mor18,mor19,mor20))
+morfinal<-round(sapply(morall, mean),2)
+```
+
+# Models for treatment strategy - output
+```{r modeloutput_second_treatment}
+# fixed effect estimates
+output_all_b<-data.frame(cbind(as.character(fix_all$term), round((fix_all$estimate),3), round((fix_all$`2.5 %`),3), round((fix_all$`97.5 %`),3), round(fix_all$p.value,3))) %>% rename(term=1, OR=2, lower=3, upper=4, p_value=5)
+write.csv(output_all_b, "output_all_combo.csv")
+
+# MOR result
+c("Median Odds Ratio - hospital site by bootstrapping")
+morfinal
+
+# figure 3
+output_all_b[1,]<-c("Median Odds Ratio for hospital site",c(morfinal[2], morfinal[1],morfinal[3]), NA)
+output_all_b[2,1]<-"Age per 1-SD increase"
+output_all_b[3,1]<-"Male gender vs female gender"
+output_all_b[4,1]<-"Hispanic vs Black"
+output_all_b[5,1]<-"Other/unknown vs Black"
+output_all_b[6,1]<-"White vs Black"
+output_all_b[7,1]<-"Northeast vs Midwest"
+output_all_b[8,1]<-"South vs Midwest"
+output_all_b[9,1]<-"West vs Midwest"
+output_all_b[10,1]<-"250-499 vs <100 hospital bed count"
+output_all_b[11,1]<-"500+ vs <100 hospital bed count"
+output_all_b[12,1]<-"Teaching hospital"
+output_all_b[13,1]<-"Cardiac ICU"
+output_all_b[14,1]<-"Medical-surgical vs medical ICU"
+output_all_b[15,1]<-"Neurological vs medical ICU"
+output_all_b[16,1]<-"Surgical vs medical ICU"
+output_all_b[17,1]<-"History of supraventricular tachycardia"
+output_all_b[18,1]<-"History of renal insufficiency"
+output_all_b[19,1]<-"APACHE-IV per 1-SD increase"
+output_all_b[20,1]<-"SOFA score per 1-SD increase"
+output_all_b[21,1]<-"Corticosteroids prior to ICU admission"
+output_all_b[22,1]<-"Net fluid balance"
+output_all_b[23,1]<-"Albumin use"
+output_all_b[24,1]<-"Weight-based norepinephrine"
+output_all_b$ordersequence<-1:24
+output_all_b$OR<-as.numeric(output_all_b$OR)
+output_all_b$lower<-as.numeric(output_all_b$lower)
+output_all_b$upper<-as.numeric(output_all_b$upper)
+
+fig3<-ggplot(output_all_b, aes(x=reorder(term, ordersequence), y=OR))+
+  geom_point()+
+  geom_errorbar(aes(ymin = lower, ymax = upper), width = 0.2)+
+ theme(axis.text.x = element_text(angle = 90, hjust = 1), legend.position = "none")+
+    theme(axis.text.y = element_text(angle = 90, hjust = 1), legend.position = "none")+
+  scale_y_continuous(trans='log10')+
+    geom_hline(yintercept=1)+
+  theme(axis.title.x = element_blank())+
+  labs(y= "Odds ratio
+Favors corticosteroids      Favors vasopressors")
+fig3
+
+ggsave("fig3.tiff")
+```
