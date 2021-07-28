@@ -183,16 +183,16 @@ ggsave("rate_by_state.tiff", width=20, height=10)
 
 ## Combined  
 ```{r overall}
-ds8<-ds5[ds5$state %in% c("Colorado","California","New Mexico","West Virginia","Arkansas","Washington","Kentucky","North Carolina","Massachusetts","Louisiana","Nevada","Michigan"),]
-mod_Combined_rate<-lme(rate~time+prepost+timepost, random=~1|dt, ds8)
-mod_Combined_diff_rate<-lme(diff_rate~time+prepost+timepost, random=~1|dt, ds8)
+ds9<-ds5[ds5$state %in% c("Colorado","California","New Mexico","West Virginia","Arkansas","Washington","Kentucky","North Carolina","Massachusetts","Louisiana","Nevada","Michigan"),]
+mod_Combined_rate<-lme(rate~time+prepost+timepost, random=~1|dt, ds9)
+mod_Combined_diff_rate<-lme(diff_rate~time+prepost+timepost, random=~1|dt, ds9)
 ```
 
 ## Combined sensitivity
 ```{r overall sensitivity}
-ds9<-ds5[ds5$state %in% c("Colorado state data", "Delaware state data","California state data","Massachusetts state data","Nevada state data"),]
-mod_Combineds_rate<-lme(rate~time+prepost+timepost, random=~1|dt, ds9)
-mod_Combineds_diff_rate<-lme(diff_rate~time+prepost+timepost, random=~1|dt, ds9)
+ds10<-ds5[ds5$state %in% c("Colorado state data", "Delaware state data","California state data","Massachusetts state data","Nevada state data"),]
+mod_Combineds_rate<-lme(rate~time+prepost+timepost, random=~1|dt, ds10)
+mod_Combineds_diff_rate<-lme(diff_rate~time+prepost+timepost, random=~1|dt, ds10)
 ```
 
 ## By state  
