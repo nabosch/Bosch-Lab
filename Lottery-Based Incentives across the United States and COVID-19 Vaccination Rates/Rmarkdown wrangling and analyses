@@ -1,0 +1,682 @@
+---
+title: "Vaccine lotteries controlled ITS"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: united
+---
+
+# Setup
+```{r setup, include=FALSE}
+library(tidyr)
+library(dplyr)
+library(ggplot2)
+library(ggtext)
+library(car)
+library(nlme)
+library(knitr)
+library(gridExtra)
+library(ggpubr)
+library(grid)
+knitr::opts_chunk$set(echo = FALSE)
+Sys.setenv(TZ = "EST")
+set.seed(7222021)
+```
+
+# Notes
+## State Data References
+1. Massachusetts COVID-19 vaccination data and updates | Mass.gov. Accessed July 28, 2021. https://www.mass.gov/info-details/massachusetts-covid-19-vaccination-data-and-updates  
+2.	Colorado COVID-19 Vaccination Data. Accessed July 27, 2021. https://covid19.colorado.gov/vaccine-data-dashboard  
+3. 	COVID-19 Vaccine Progress Dashboard Data - Statewide COVID-19 Vaccines Administered By County - California Open Data. Accessed July 27, 2021. https://data.ca.gov/dataset/covid-19-vaccine-progress-dashboard-data/resource/c020ef6b-2116-4775-b11d-9df2875096ab  
+4. 	Coronavirus (COVID-19) in Nevada | Nevada Health Response. Accessed July 27, 2021. https://nvhealthresponse.nv.gov/  
+5. Coronavirus Vaccine Tracker. Accessed July 28, 2021. https://myhealthycommunity.dhss.delaware.gov/locations/state/vaccine-tracker
+
+# Dataset Setup  
+## Import  
+```{r import}
+cdc_data <- read.csv(file="cdc_vax_7-27-2021.csv", header=T, stringsAsFactors=F)
+state_data<-read.csv(file="state_data.csv", stringsAsFactors = FALSE)
+lottery_info<-read.csv(file="lottery_information.csv", stringsAsFactors = FALSE)
+states <- read.csv(file="csvData.csv", header=T, stringsAsFactors=F)
+```
+
+
+## Wrangling  
+```{r wrangling}
+# INCLUDE DATES FROM 5/16 to 7/26/21
+cdc_data2  <- cdc_data[cdc_data$Date>="05/16/2021" & cdc_data$Date<="07/26/2021" , c("Date","Location","Administered_Dose1_Recip","Administered_Dose1_Pop_Pct")]
+names(cdc_data2) <- c("Date","state","Admin","Administered_Dose1_Pop_Pct")
+
+# CALCULATE POPULATION, ADD state FULL NAME
+cdc_data2$Pop <- round(cdc_data2$Admin/(cdc_data2$Administered_Dose1_Pop_Pct/100), digits=0)
+states <- states[,c("ï..State","Code")]
+names(states) <- c("state","Abbreviation")
+cdc_data2 <- merge(x=cdc_data2, y=states, by.x="state", by.y="Abbreviation")
+
+# 	ORDER BY state, DATE FOR THE PURPOSES OF CREATING LAGGED CUMULATIVE DOSES VARIABLE
+cdc_data2 <- cdc_data2[order(cdc_data2$state,cdc_data2$Date),]
+cdc_data2 <- cdc_data2[,c("state.y","state","Date","Admin","Pop")]
+names(cdc_data2) <- c("state","Abbreviation","Date","Admin","Pop")
+
+# CREATE A LAGGED & LEADING CUMULATIVE DOSE VARIABLE WITHIN EACH state GROUP.
+# CALCULATE DAILY DOSES AS A NEW VARIABLE Daily_Admin
+cdc_data2 <- cdc_data2 %>%
+		group_by(state) %>%
+  		mutate(Lag_Admin = lag(Admin),
+	         	 Lead_Admin = lead(Admin))
+cdc_data2$Daily_Admin <- cdc_data2$Admin-cdc_data2$Lag_Admin
+
+# REPLACE INVALILD NEGATIVE DAILY DOSES WITH MISSING VALUES
+cdc_data2$Daily_Admin[cdc_data2$Daily_Admin<0 & cdc_data2$Date>="05/17/2021" & cdc_data2$Date<="07/26/2021"] <- NA
+
+# REPLACE THE INVALID INCREASE IN DAILY DOSES FOR NC ON 6/30/2021 WITH MISSING VALUE
+cdc_data2$Daily_Admin[cdc_data2$Abbreviation=="NC" & cdc_data2$Date=="06/30/2021"] <- NA
+
+# CALCULATE RATE
+cdc_data2$rate = (cdc_data2$Daily_Admin/cdc_data2$Pop)*100000
+
+# CREATE THE LOTTERY-stateS ONLY DATA SET AND RESTRICT DATES TO 5/17/21 - 7/26/21
+cdc_lottery <- cdc_data2[cdc_data2$Date>="05/17/2021" & cdc_data2$Abbreviation %in% c("OH", "MD", "OR", "CO", "DE", "CA", "NM", "WV", "AR", "WA", "KY", "NC", "MA", "ME", "IL", "LA", "NV", "MI","MO"),
+				   c("state","Date","Admin","Daily_Admin","Pop","rate")]
+
+# CREATE THE NON-LOTTERY-stateS ONLY DATA SET AND RESTRICT DATES TO 5/17/21 - 7/26/21
+cdc_non_lottery <- cdc_data2[cdc_data2$Date>="05/17/2021" & cdc_data2$Abbreviation %in% c("AL", "AK", "AZ", "CT", "FL", "GA", "HI", "ID", "IN", "IA", "KS", "MN", "MS", "MT", "NE", 
+										 "NH", "NJ", "NY", "ND", "OK", "PA", "RI", "SC", "SD", "TN", "TX", "UT", "VT", "VA", "WI", "WY"),
+				      	c("state","Date","Admin","Daily_Admin","Pop","rate")]
+
+
+# FOR NON-LOTTERY stateS SUM DOSES & POPULATION BY DATE AND CALCULATE rate as DAILY DOSES / POPULATION * 100,000	
+# CREATE A NEW state CATEGORY CALLED "Non-Lottery states"
+agg_non_lottery <-aggregate(cbind(cdc_non_lottery$Admin,cdc_non_lottery$Daily_Admin,cdc_non_lottery$Pop), by=list(cdc_non_lottery$Date),FUN=sum, na.rm=TRUE)
+names(agg_non_lottery) <- c("Date","Admin","Daily_Admin","Pop")
+
+# RECALCULATE rate USING THE AGGREGATED Daily_Admin AND Pop VARIABLES FOR NON-LOTTERY stateS
+agg_non_lottery$rate <- agg_non_lottery$Daily_Admin/agg_non_lottery$Pop*100000
+agg_non_lottery$state <- "Non-Lottery states"
+agg_non_lottery <- agg_non_lottery[,c("state","Date","Admin","Daily_Admin","Pop","rate")]
+
+
+# COMBINE DATASETS WITH STATE DATA
+ds <- rbind(cdc_lottery,agg_non_lottery) %>% mutate(dt=as.Date(Date, format="%m/%d/%Y")) %>% select(state, dt, Daily_Admin, Pop, rate)
+state_data1<-state_data %>% rename(state=ï..State) %>% mutate(dt=as.Date(Date, format="%m/%d/%Y")) %>% select(state, dt, Daily_Admin, Pop, rate)
+lottery_info1<-lottery_info %>% rename(state=ï..state) %>% mutate(lottery_dt=as.Date(lottery_dt, format="%m/%d/%Y"))
+ds1<-rbind(ds,state_data1)
+ds1<-full_join(ds1, lottery_info1) 
+
+# CREATE TIME VARIABLE WITH 0 AS LOTTERY DATE
+ds1$time<-(as.numeric(ds1$dt)-as.numeric(ds1$lottery_dt))
+
+# CREATE PREPOST LOTTERY VARIABLE
+ds1$prepost<-0
+ds1$prepost[ds1$time>0]<-1
+
+# CREATE TIMEPOST LOTTERY VARIABLE
+ds1$timepost<-0
+ds1$timepost[ds1$prepost==1]<-ds1$time[ds1$prepost==1]
+
+# CREATE DAY OF WEEK VARIABLE
+ds1$dow<-weekdays(ds1$dt)
+
+# EXCLUDE LOTTERY STATES WITH LOTTERIES PRIOR TO 5/24 OR AFTER 7/20 BECAUSE NOT AT LEAST ONE WEEK OF DATA (excludes ohio, maryland, oregon and missouri)
+ds2<-ds1[is.na(ds1$lottery_dt) | (ds1$lottery_dt>=as.Date("2021/05/24", format="%Y/%m/%d") & ds1$lottery_dt<=as.Date("2021/07/20", format="%Y/%m/%d")),]
+
+# FACTOR STATE VARIABLE TO CREATE LEVELS SO THAT FIGURE ORDER IS ORDER IN TIME OF VACCINE LOTTERIES
+ds2$state<-factor(ds2$state, levels=c("Colorado", "Delaware","California","New Mexico","West Virginia","Arkansas","Washington","Kentucky","North Carolina","Massachusetts", "Maine", "Illinois","Louisiana","Nevada","Michigan","Colorado state data", "Delaware state data","California state data","Massachusetts state data","Nevada state data"))
+
+# CONVERT DATASET TO WIDE TO CREATE DIFF_RATE VARIABLE
+lot1<-ds2[!is.na(ds2$lottery_dt),]
+nlot1<-ds2[is.na(ds2$lottery_dt),c("dt","rate", "Daily_Admin","Pop")] %>% rename(nlot_rate=rate, nlot_admin=Daily_Admin, nlot_pop=Pop)
+ds3<-left_join(lot1, nlot1)
+ds3$diff_rate<-ds3$rate-ds3$nlot_rate
+
+# REMOVE MISSING ROWS CREATED IN CODE LINES 91-96 FOR EXTREME RATES
+ds4<-ds3[!is.na(ds3$diff_rate),]
+
+# RESTRICTING TO WITHIN 28 DAYS OF LOTTERY ANNOUNCEMENT
+ds5<-ds4[ds4$time>=-28 & ds4$time<=28,]
+
+# CREATING DATASET FOR COMBINED STATE ANALYSIS
+ds6<-ds5 %>% group_by(time) %>% summarize(Daily_Admin=sum(Daily_Admin), Pop=sum(Pop), prepost=max(prepost),timepost=max(timepost), nlot_admin=sum(nlot_admin), nlot_pop=sum(nlot_pop)) %>% mutate(rate=(Daily_Admin/Pop)*100000, nlot_rate=(nlot_admin/nlot_pop)*100000) %>% mutate(diff_rate=rate-nlot_rate)
+
+# ADDING COMBINED DATASET TO STATE DATASET FOR FIGURE
+ds6$state<-"Combined"
+ds7<-rbind(ds6[,c("state","time","prepost","timepost", "nlot_rate", "rate", "diff_rate")], ds5[,c("state","time", "prepost","timepost", "rate", "nlot_rate","diff_rate")]) %>% mutate(state=factor(state, levels=c("Combined","Colorado", "Delaware","California","New Mexico","West Virginia","Arkansas","Washington","Kentucky","North Carolina","Massachusetts", "Maine", "Illinois","Louisiana","Nevada","Michigan","Colorado state data", "Delaware state data","California state data","Massachusetts state data","Nevada state data")))
+ds8<-pivot_longer(ds7, cols=c(rate, nlot_rate), names_to="cohort", values_to="rate")
+```
+
+# Vizualization  
+## Rate  
+Blue is non-lottery states, red is lottery states
+```{r rate_visualization}
+fig1<-ggplot(ds8, aes(x=time, y=rate, color=cohort))+
+  geom_point()+
+  geom_vline(xintercept=0, linetype="dotted", size=1)+
+  ylab("Vaccination Rate/100,000")+
+  xlab("Weeks from lottery announcement")+
+  geom_smooth(data=subset(ds8, prepost==0), se=T, method="lm")+
+  geom_smooth(data=subset(ds8, prepost==1), se=T, method="lm")+
+  coord_cartesian(y=c(0,500))+
+  scale_x_continuous(breaks=c(-28,-21,-14,-7,0,7,14,21,28), labels=c("-4","-3","-2","-1","0","1","2","3","4"))+
+  theme(axis.line = element_line(colour = "black"),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.border = element_blank(),
+    panel.background = element_blank(),
+    legend.position = "none",
+        text = element_text(size=20),
+    strip.text = element_text(size = 20))+
+  facet_wrap(~ state)
+fig1
+
+ggsave("rate_by_state.tiff", width=20, height=10)
+```
+
+## Difference in rates (lottery state minus non-lottery states)  
+```{r diff_rate_visualization}
+fig2<-ggplot(ds7, aes(x=time, y=diff_rate))+
+  geom_point()+
+  geom_vline(xintercept=0, linetype="dotted", size=1)+
+  ylab("Lottery State Rate - Non-lottery State Rate/100,000")+
+  xlab("Weeks from lottery announcement")+
+  geom_smooth(data=subset(ds7, prepost==0), se=T, method="lm")+
+  geom_smooth(data=subset(ds7, prepost==1), se=T, method="lm")+
+  coord_cartesian(y=c(-250,250))+
+  scale_x_continuous(breaks=c(-28,-21,-14,-7,0,7,14,21,28), labels=c("-4","-3","-2","-1","0","1","2","3","4"))+
+  theme(axis.line = element_line(colour = "black"),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.border = element_blank(),
+    panel.background = element_blank(),
+    legend.position = "none",
+    text = element_text(size=20),
+    strip.text = element_text(size = 20))+
+  facet_wrap(~ state)
+fig2
+
+ggsave("diff_rate_by_state.tiff", width=20, height=10)
+```
+
+## Combined figure  
+```{r combined figure}
+fig<-ggarrange(fig1, fig2, ncol=1, nrow=2, labels= c("A","B"), font.label = list(size = 20))
+fig
+ggsave("fig.tiff", width=20, height=20)
+ggsave("fig.jpeg", width=20, height=20)
+```
+
+# Models  
+
+## Combined  
+```{r overall}
+ds8<-ds5[ds5$state %in% c("Colorado","California","New Mexico","West Virginia","Arkansas","Washington","Kentucky","North Carolina","Massachusetts","Louisiana","Nevada","Michigan"),]
+mod_Combined_rate<-lme(rate~time+prepost+timepost, random=~1|dt, ds8)
+mod_Combined_diff_rate<-lme(diff_rate~time+prepost+timepost, random=~1|dt, ds8)
+```
+
+## By state  
+### Colorado  
+```{r Colorado}
+durbinWatsonTest(lm(rate~time+prepost+timepost+dow, ds5[ds5$state=="Colorado",]), max.lag=1) 
+durbinWatsonTest(lm(diff_rate~time+prepost+timepost+dow, ds5[ds5$state=="Colorado",]), max.lag=1) 
+
+mod_CO_rate<-nlme::gls(rate~time+prepost+timepost+dow, ds5[ds5$state=="Colorado",], na.action=na.omit, method="ML")
+mod_CO_diff_rate<-nlme::gls(diff_rate~time+prepost+timepost+dow, ds5[ds5$state=="Colorado",], na.action=na.omit, method="ML")
+```
+  
+### Delaware  
+```{r Delaware}
+durbinWatsonTest(lm(rate~time+prepost+timepost+dow, ds5[ds5$state=="Delaware",]), max.lag=1) 
+durbinWatsonTest(lm(diff_rate~time+prepost+timepost+dow, ds5[ds5$state=="Delaware",]), max.lag=1) 
+
+mod_DE_rate<-nlme::gls(rate~time+prepost+timepost+dow, ds5[ds5$state=="Delaware",], na.action=na.omit, method="ML")
+mod_DE_diff_rate<-nlme::gls(diff_rate~time+prepost+timepost+dow, ds5[ds5$state=="Delaware",], na.action=na.omit, method="ML")
+```
+
+
+### California  
+```{r California}
+durbinWatsonTest(lm(rate~time+prepost+timepost+dow, ds5[ds5$state=="California",]), max.lag=1)
+durbinWatsonTest(lm(diff_rate~time+prepost+timepost+dow, ds5[ds5$state=="California",]), max.lag=1) 
+
+mod_CA_rate<-nlme::gls(rate~time+prepost+timepost+dow, ds5[ds5$state=="California",], correlation=corAR1(form=~time), na.action=na.omit, method="ML")
+mod_CA_diff_rate<-nlme::gls(diff_rate~time+prepost+timepost+dow, ds5[ds5$state=="California",], na.action=na.omit, method="ML")
+```
+
+
+### New Mexico  
+```{r New Mexico}
+durbinWatsonTest(lm(rate~time+prepost+timepost+dow, ds5[ds5$state=="New Mexico",]), max.lag=1) 
+durbinWatsonTest(lm(diff_rate~time+prepost+timepost+dow, ds5[ds5$state=="New Mexico",]), max.lag=1)
+
+mod_NM_rate<-nlme::gls(rate~time+prepost+timepost+dow, ds5[ds5$state=="New Mexico",], na.action=na.omit, method="ML")
+mod_NM_diff_rate<-nlme::gls(diff_rate~time+prepost+timepost+dow, ds5[ds5$state=="New Mexico",], na.action=na.omit, method="ML")
+```
+
+### West Virginia  
+```{r West Virginia}
+durbinWatsonTest(lm(rate~time+prepost+timepost+dow, ds5[ds5$state=="West Virginia",]), max.lag=1) 
+durbinWatsonTest(lm(diff_rate~time+prepost+timepost+dow, ds5[ds5$state=="West Virginia",]), max.lag=1) 
+
+mod_WV_rate<-nlme::gls(rate~time+prepost+timepost+dow, ds5[ds5$state=="West Virginia",], na.action=na.omit, method="ML")
+mod_WV_diff_rate<-nlme::gls(diff_rate~time+prepost+timepost+dow, ds5[ds5$state=="West Virginia",], na.action=na.omit, method="ML")
+```
+
+### Arkansas  
+```{r Arkansas}
+durbinWatsonTest(lm(rate~time+prepost+timepost+dow, ds5[ds5$state=="Arkansas",]), max.lag=1) 
+durbinWatsonTest(lm(diff_rate~time+prepost+timepost+dow, ds5[ds5$state=="Arkansas",]), max.lag=1) 
+
+mod_AR_rate<-nlme::gls(rate~time+prepost+timepost+dow, ds5[ds5$state=="Arkansas",], correlation=corAR1(form=~time), na.action=na.omit, method="ML")
+mod_AR_diff_rate<-nlme::gls(diff_rate~time+prepost+timepost+dow, ds5[ds5$state=="Arkansas",], na.action=na.omit, method="ML")
+```
+
+### Washington  
+```{r Washington}
+durbinWatsonTest(lm(rate~time+prepost+timepost+dow, ds5[ds5$state=="Washington",]), max.lag=1) 
+durbinWatsonTest(lm(diff_rate~time+prepost+timepost+dow, ds5[ds5$state=="Washington",]), max.lag=1) 
+
+mod_WA_rate<-nlme::gls(rate~time+prepost+timepost+dow, ds5[ds5$state=="Washington",], na.action=na.omit, method="ML")
+mod_WA_diff_rate<-nlme::gls(diff_rate~time+prepost+timepost+dow, ds5[ds5$state=="Washington",], correlation=corAR1(form=~time), na.action=na.omit, method="ML")
+```
+
+
+### Kentucky  
+```{r Kentucky}
+durbinWatsonTest(lm(rate~time+prepost+timepost+dow, ds5[ds5$state=="Kentucky",]), max.lag=1) 
+durbinWatsonTest(lm(diff_rate~time+prepost+timepost+dow, ds5[ds5$state=="Kentucky",]), max.lag=1) 
+
+mod_KY_rate<-nlme::gls(rate~time+prepost+timepost+dow, ds5[ds5$state=="Kentucky",], na.action=na.omit, method="ML")
+mod_KY_diff_rate<-nlme::gls(diff_rate~time+prepost+timepost+dow, ds5[ds5$state=="Kentucky",], na.action=na.omit, method="ML")
+```
+
+### North Carolina  
+```{r North Carolina}
+durbinWatsonTest(lm(rate~time+prepost+timepost+dow, ds5[ds5$state=="North Carolina",]), max.lag=1) 
+durbinWatsonTest(lm(diff_rate~time+prepost+timepost+dow, ds5[ds5$state=="North Carolina",]), max.lag=1) 
+
+mod_NC_rate<-nlme::gls(rate~time+prepost+timepost+dow, ds5[ds5$state=="North Carolina",], na.action=na.omit, method="ML")
+mod_NC_diff_rate<-nlme::gls(diff_rate~time+prepost+timepost+dow, ds5[ds5$state=="North Carolina",], na.action=na.omit, method="ML")
+```
+
+### Massachusetts  
+```{r Massachusetts}
+durbinWatsonTest(lm(rate~time+prepost+timepost+dow, ds5[ds5$state=="Massachusetts",]), max.lag=1) 
+durbinWatsonTest(lm(diff_rate~time+prepost+timepost+dow, ds5[ds5$state=="Massachusetts",]), max.lag=1) 
+
+mod_MA_rate<-nlme::gls(rate~time+prepost+timepost+dow, ds5[ds5$state=="Massachusetts",], na.action=na.omit, method="ML")
+mod_MA_diff_rate<-nlme::gls(diff_rate~time+prepost+timepost+dow, ds5[ds5$state=="Massachusetts",], na.action=na.omit, method="ML")
+```
+
+### Maine  
+```{r Maine}
+durbinWatsonTest(lm(rate~time+prepost+timepost+dow, ds5[ds5$state=="Maine",]), max.lag=1) 
+durbinWatsonTest(lm(diff_rate~time+prepost+timepost+dow, ds5[ds5$state=="Maine",]), max.lag=1) 
+
+mod_ME_rate<-nlme::gls(rate~time+prepost+timepost+dow, ds5[ds5$state=="Maine",], na.action=na.omit, method="ML")
+mod_ME_diff_rate<-nlme::gls(diff_rate~time+prepost+timepost+dow, ds5[ds5$state=="Maine",], na.action=na.omit, method="ML")
+```
+
+
+### Illinois  
+```{r Illinois}
+durbinWatsonTest(lm(rate~time+prepost+timepost+dow, ds5[ds5$state=="Illinois",]), max.lag=1) 
+durbinWatsonTest(lm(diff_rate~time+prepost+timepost+dow, ds5[ds5$state=="Illinois",]), max.lag=1) 
+
+mod_IL_rate<-nlme::gls(rate~time+prepost+timepost+dow, ds5[ds5$state=="Illinois",], na.action=na.omit, method="ML")
+mod_IL_diff_rate<-nlme::gls(diff_rate~time+prepost+timepost+dow, ds5[ds5$state=="Illinois",], correlation=corAR1(form=~time), na.action=na.omit, method="ML")
+```
+
+
+### Louisiana  
+```{r Louisiana}
+durbinWatsonTest(lm(rate~time+prepost+timepost+dow, ds5[ds5$state=="Louisiana",]), max.lag=1) 
+durbinWatsonTest(lm(diff_rate~time+prepost+timepost+dow, ds5[ds5$state=="Louisiana",]), max.lag=1)  
+
+mod_LA_rate<-nlme::gls(rate~time+prepost+timepost+dow, ds5[ds5$state=="Louisiana",], na.action=na.omit, method="ML")
+mod_LA_diff_rate<-nlme::gls(diff_rate~time+prepost+timepost+dow, ds5[ds5$state=="Louisiana",], na.action=na.omit, method="ML")
+```
+
+### Nevada  
+```{r Nevada}
+durbinWatsonTest(lm(rate~time+prepost+timepost+dow, ds5[ds5$state=="Nevada",]), max.lag=1) 
+durbinWatsonTest(lm(diff_rate~time+prepost+timepost+dow, ds5[ds5$state=="Nevada",]), max.lag=1) 
+
+mod_NV_rate<-nlme::gls(rate~time+prepost+timepost+dow, ds5[ds5$state=="Nevada",], correlation=corAR1(form=~time), na.action=na.omit, method="ML")
+mod_NV_diff_rate<-nlme::gls(diff_rate~time+prepost+timepost+dow, ds5[ds5$state=="Nevada",], na.action=na.omit, method="ML")
+```
+
+
+### Michigan  
+```{r Michigan}
+durbinWatsonTest(lm(rate~time+prepost+timepost+dow, ds5[ds5$state=="Michigan",]), max.lag=1) 
+durbinWatsonTest(lm(diff_rate~time+prepost+timepost+dow, ds5[ds5$state=="Michigan",]), max.lag=1) 
+
+mod_MI_rate<-nlme::gls(rate~time+prepost+timepost+dow, ds5[ds5$state=="Michigan",], na.action=na.omit, method="ML")
+mod_MI_diff_rate<-nlme::gls(diff_rate~time+prepost+timepost+dow, ds5[ds5$state=="Michigan",], na.action=na.omit, method="ML")
+```
+
+### Colorado state data  
+```{r Colorado state data}
+durbinWatsonTest(lm(rate~time+prepost+timepost+dow, ds5[ds5$state=="Colorado state data",]), max.lag=1) 
+durbinWatsonTest(lm(diff_rate~time+prepost+timepost+dow, ds5[ds5$state=="Colorado state data",]), max.lag=1) 
+
+mod_COs_rate<-nlme::gls(rate~time+prepost+timepost+dow, ds5[ds5$state=="Colorado state data",], na.action=na.omit, method="ML")
+mod_COs_diff_rate<-nlme::gls(diff_rate~time+prepost+timepost+dow, ds5[ds5$state=="Colorado state data",], na.action=na.omit, method="ML")
+```
+### Delaware state data  
+```{r Delaware state data}
+durbinWatsonTest(lm(rate~time+prepost+timepost+dow, ds5[ds5$state=="Delaware state data",]), max.lag=1) 
+durbinWatsonTest(lm(diff_rate~time+prepost+timepost+dow, ds5[ds5$state=="Delaware state data",]), max.lag=1) 
+
+mod_DEs_rate<-nlme::gls(rate~time+prepost+timepost+dow, ds5[ds5$state=="Delaware state data",], na.action=na.omit, method="ML")
+mod_DEs_diff_rate<-nlme::gls(diff_rate~time+prepost+timepost+dow, ds5[ds5$state=="Delaware state data",], na.action=na.omit, method="ML")
+```
+
+
+### California state data  
+```{r California state data}
+durbinWatsonTest(lm(rate~time+prepost+timepost+dow, ds5[ds5$state=="California state data",]), max.lag=1) 
+durbinWatsonTest(lm(diff_rate~time+prepost+timepost+dow, ds5[ds5$state=="California state data",]), max.lag=1) 
+
+mod_CAs_rate<-nlme::gls(rate~time+prepost+timepost+dow, ds5[ds5$state=="California state data",], na.action=na.omit, method="ML")
+mod_CAs_diff_rate<-nlme::gls(diff_rate~time+prepost+timepost+dow, ds5[ds5$state=="California state data",], na.action=na.omit, method="ML")
+```
+
+### Massachusetts state data  
+```{r Massachusetts state data}
+durbinWatsonTest(lm(rate~time+prepost+timepost+dow, ds5[ds5$state=="Massachusetts state data",]), max.lag=1) 
+durbinWatsonTest(lm(diff_rate~time+prepost+timepost+dow, ds5[ds5$state=="Massachusetts state data",]), max.lag=1) 
+
+mod_MAs_rate<-nlme::gls(rate~time+prepost+timepost+dow, ds5[ds5$state=="Massachusetts state data",], correlation=corAR1(form=~time), na.action=na.omit, method="ML")
+mod_MAs_diff_rate<-nlme::gls(diff_rate~time+prepost+timepost+dow, ds5[ds5$state=="Massachusetts state data",], na.action=na.omit, method="ML")
+```
+
+### Nevada state data  
+```{r Nevada state data}
+durbinWatsonTest(lm(rate~time+prepost+timepost+dow, ds5[ds5$state=="Nevada state data",]), max.lag=1) 
+durbinWatsonTest(lm(diff_rate~time+prepost+timepost+dow, ds5[ds5$state=="Nevada state data",]), max.lag=1) 
+
+mod_NVs_rate<-nlme::gls(rate~time+prepost+timepost+dow, ds5[ds5$state=="Nevada state data",], correlation=corAR1(form=~time), na.action=na.omit, method="ML")
+mod_NVs_diff_rate<-nlme::gls(diff_rate~time+prepost+timepost+dow, ds5[ds5$state=="Nevada state data",], na.action=na.omit, method="ML")
+```
+
+# Model Output  
+## Rates  
+```{r rate_table}
+Combined_rate<-cbind.data.frame(round(fixef(mod_Combined_rate),1),
+round(intervals(mod_Combined_rate)$fixed,1)[,c(1,3)]) 
+Combined_rate <- Combined_rate %>% rename(beta=colnames(Combined_rate[1]), low=colnames(Combined_rate[2]), high=colnames(Combined_rate[3]))
+Combined_rate$effect=paste(Combined_rate$beta, "(",Combined_rate$low, ",", Combined_rate$high, ")")
+Combined_rate<-t(Combined_rate[,c("effect")])
+
+CO_rate<-cbind.data.frame(round(coef(mod_CO_rate),1),
+round(confint(mod_CO_rate),1)) 
+CO_rate <- CO_rate %>% rename(beta=colnames(CO_rate[1]), low=colnames(CO_rate[2]), high=colnames(CO_rate[3]))
+CO_rate$effect=paste(CO_rate$beta, "(",CO_rate$low, ",", CO_rate$high, ")")
+CO_rate<-t(CO_rate[,c("effect")])
+
+DE_rate<-cbind.data.frame(round(coef(mod_DE_rate),1),
+round(confint(mod_DE_rate),1)) 
+DE_rate <- DE_rate %>% rename(beta=colnames(DE_rate[1]), low=colnames(DE_rate[2]), high=colnames(DE_rate[3]))
+DE_rate$effect=paste(DE_rate$beta, "(",DE_rate$low, ",", DE_rate$high, ")")
+DE_rate<-t(DE_rate[,c("effect")])
+
+CA_rate<-cbind.data.frame(round(coef(mod_CA_rate),1),
+round(confint(mod_CA_rate),1)) 
+CA_rate <- CA_rate %>% rename(beta=colnames(CA_rate[1]), low=colnames(CA_rate[2]), high=colnames(CA_rate[3]))
+CA_rate$effect=paste(CA_rate$beta, "(",CA_rate$low, ",", CA_rate$high, ")")
+CA_rate<-t(CA_rate[,c("effect")])
+
+NM_rate<-cbind.data.frame(round(coef(mod_NM_rate),1),
+round(confint(mod_NM_rate),1)) 
+NM_rate <- NM_rate %>% rename(beta=colnames(NM_rate[1]), low=colnames(NM_rate[2]), high=colnames(NM_rate[3]))
+NM_rate$effect=paste(NM_rate$beta, "(",NM_rate$low, ",", NM_rate$high, ")")
+NM_rate<-t(NM_rate[,c("effect")])
+
+WV_rate<-cbind.data.frame(round(coef(mod_WV_rate),1),
+round(confint(mod_WV_rate),1)) 
+WV_rate <- WV_rate %>% rename(beta=colnames(WV_rate[1]), low=colnames(WV_rate[2]), high=colnames(WV_rate[3]))
+WV_rate$effect=paste(WV_rate$beta, "(",WV_rate$low, ",", WV_rate$high, ")")
+WV_rate<-t(WV_rate[,c("effect")])
+
+AR_rate<-cbind.data.frame(round(coef(mod_AR_rate),1),
+round(confint(mod_AR_rate),1)) 
+AR_rate <- AR_rate %>% rename(beta=colnames(AR_rate[1]), low=colnames(AR_rate[2]), high=colnames(AR_rate[3]))
+AR_rate$effect=paste(AR_rate$beta, "(",AR_rate$low, ",", AR_rate$high, ")")
+AR_rate<-t(AR_rate[,c("effect")])
+
+WA_rate<-cbind.data.frame(round(coef(mod_WA_rate),1),
+round(confint(mod_WA_rate),1)) 
+WA_rate <- WA_rate %>% rename(beta=colnames(WA_rate[1]), low=colnames(WA_rate[2]), high=colnames(WA_rate[3]))
+WA_rate$effect=paste(WA_rate$beta, "(",WA_rate$low, ",", WA_rate$high, ")")
+WA_rate<-t(WA_rate[,c("effect")])
+
+KY_rate<-cbind.data.frame(round(coef(mod_KY_rate),1),
+round(confint(mod_KY_rate),1)) 
+KY_rate <- KY_rate %>% rename(beta=colnames(KY_rate[1]), low=colnames(KY_rate[2]), high=colnames(KY_rate[3]))
+KY_rate$effect=paste(KY_rate$beta, "(",KY_rate$low, ",", KY_rate$high, ")")
+KY_rate<-t(KY_rate[,c("effect")])
+
+NC_rate<-cbind.data.frame(round(coef(mod_NC_rate),1),
+round(confint(mod_NC_rate),1)) 
+NC_rate <- NC_rate %>% rename(beta=colnames(NC_rate[1]), low=colnames(NC_rate[2]), high=colnames(NC_rate[3]))
+NC_rate$effect=paste(NC_rate$beta, "(",NC_rate$low, ",", NC_rate$high, ")")
+NC_rate<-t(NC_rate[,c("effect")])
+
+MA_rate<-cbind.data.frame(round(coef(mod_MA_rate),1),
+round(confint(mod_MA_rate),1)) 
+MA_rate <- MA_rate %>% rename(beta=colnames(MA_rate[1]), low=colnames(MA_rate[2]), high=colnames(MA_rate[3]))
+MA_rate$effect=paste(MA_rate$beta, "(",MA_rate$low, ",", MA_rate$high, ")")
+MA_rate<-t(MA_rate[,c("effect")])
+
+ME_rate<-cbind.data.frame(round(coef(mod_ME_rate),1),
+round(confint(mod_ME_rate),1)) 
+ME_rate <- ME_rate %>% rename(beta=colnames(ME_rate[1]), low=colnames(ME_rate[2]), high=colnames(ME_rate[3]))
+ME_rate$effect=paste(ME_rate$beta, "(",ME_rate$low, ",", ME_rate$high, ")")
+ME_rate<-t(ME_rate[,c("effect")])
+
+IL_rate<-cbind.data.frame(round(coef(mod_IL_rate),1),
+round(confint(mod_IL_rate),1)) 
+IL_rate <- IL_rate %>% rename(beta=colnames(IL_rate[1]), low=colnames(IL_rate[2]), high=colnames(IL_rate[3]))
+IL_rate$effect=paste(IL_rate$beta, "(",IL_rate$low, ",", IL_rate$high, ")")
+IL_rate<-t(IL_rate[,c("effect")])
+
+LA_rate<-cbind.data.frame(round(coef(mod_LA_rate),1),
+round(confint(mod_LA_rate),1)) 
+LA_rate <- LA_rate %>% rename(beta=colnames(LA_rate[1]), low=colnames(LA_rate[2]), high=colnames(LA_rate[3]))
+LA_rate$effect=paste(LA_rate$beta, "(",LA_rate$low, ",", LA_rate$high, ")")
+LA_rate<-t(LA_rate[,c("effect")])
+
+NV_rate<-cbind.data.frame(round(coef(mod_NV_rate),1),
+round(confint(mod_NV_rate),1)) 
+NV_rate <- NV_rate %>% rename(beta=colnames(NV_rate[1]), low=colnames(NV_rate[2]), high=colnames(NV_rate[3]))
+NV_rate$effect=paste(NV_rate$beta, "(",NV_rate$low, ",", NV_rate$high, ")")
+NV_rate<-t(NV_rate[,c("effect")])
+
+MI_rate<-cbind.data.frame(round(coef(mod_MI_rate),1),
+round(confint(mod_MI_rate),1)) 
+MI_rate <- MI_rate %>% rename(beta=colnames(MI_rate[1]), low=colnames(MI_rate[2]), high=colnames(MI_rate[3]))
+MI_rate$effect=paste(MI_rate$beta, "(",MI_rate$low, ",", MI_rate$high, ")")
+MI_rate<-t(MI_rate[,c("effect")])
+
+COs_rate<-cbind.data.frame(round(coef(mod_COs_rate),1),
+round(confint(mod_COs_rate),1)) 
+COs_rate <- COs_rate %>% rename(beta=colnames(COs_rate[1]), low=colnames(COs_rate[2]), high=colnames(COs_rate[3]))
+COs_rate$effect=paste(COs_rate$beta, "(",COs_rate$low, ",", COs_rate$high, ")")
+COs_rate<-t(COs_rate[,c("effect")])
+
+DEs_rate<-cbind.data.frame(round(coef(mod_DEs_rate),1),
+round(confint(mod_DEs_rate),1)) 
+DEs_rate <- DEs_rate %>% rename(beta=colnames(DEs_rate[1]), low=colnames(DEs_rate[2]), high=colnames(DEs_rate[3]))
+DEs_rate$effect=paste(DEs_rate$beta, "(",DEs_rate$low, ",", DEs_rate$high, ")")
+DEs_rate<-t(DEs_rate[,c("effect")])
+
+CAs_rate<-cbind.data.frame(round(coef(mod_CAs_rate),1),
+round(confint(mod_CAs_rate),1)) 
+CAs_rate <- CAs_rate %>% rename(beta=colnames(CAs_rate[1]), low=colnames(CAs_rate[2]), high=colnames(CAs_rate[3]))
+CAs_rate$effect=paste(CAs_rate$beta, "(",CAs_rate$low, ",", CAs_rate$high, ")")
+CAs_rate<-t(CAs_rate[,c("effect")])
+
+MAs_rate<-cbind.data.frame(round(coef(mod_MAs_rate),1),
+round(confint(mod_MAs_rate),1)) 
+MAs_rate <- MAs_rate %>% rename(beta=colnames(MAs_rate[1]), low=colnames(MAs_rate[2]), high=colnames(MAs_rate[3]))
+MAs_rate$effect=paste(MAs_rate$beta, "(",MAs_rate$low, ",", MAs_rate$high, ")")
+MAs_rate<-t(MAs_rate[,c("effect")])
+
+NVs_rate<-cbind.data.frame(round(coef(mod_NVs_rate),1),
+round(confint(mod_NVs_rate),1)) 
+NVs_rate <- NVs_rate %>% rename(beta=colnames(NVs_rate[1]), low=colnames(NVs_rate[2]), high=colnames(NVs_rate[3]))
+NVs_rate$effect=paste(NVs_rate$beta, "(",NVs_rate$low, ",", NVs_rate$high, ")")
+NVs_rate<-t(NVs_rate[,c("effect")])
+
+rate_table<-as.data.frame(rbind(Combined_rate[,2:4], CO_rate[,2:4], DE_rate[,2:4], CA_rate[,2:4], NM_rate[,2:4], WV_rate[,2:4], AR_rate[,2:4], WA_rate[,2:4], KY_rate[,2:4], NC_rate[,2:4], MA_rate[,2:4], ME_rate[,2:4], IL_rate[,2:4], LA_rate[,2:4], NV_rate[,2:4], MI_rate[,2:4], COs_rate[,2:4], DEs_rate[,2:4], CAs_rate[,2:4], MAs_rate[,2:4], NVs_rate[,2:4])) %>% rename(pre_rate=V1, jump=V2, post_rate_change=V3)
+rate_table$cohort<-c("Combined", "Colorado", "Delaware", "California", "New Mexico", "West Virginia", "Arkansas", "Washington", "Kentucky", "North Carolina", "Massachusetts", "Maine", "Illinois", "Louisiana", "Nevada", "Michigan", "Colorado state data", "Delaware state data", "California state data", "Massachusetts state data", "Nevada state data")
+rate_table$lottery_date<-c("NA","5/25/2021", "5/25/2021", "5/27/2021","6/1/2021","6/1/2021","6/1/2021","6/3/2021","6/4/2021","6/10/2021","6/15/2021", "6/16/2021", "6/17/2021","6/17/2021","6/17/2021","7/1/2021", "5/25/2021", "5/25/2021", "5/27/2021", "6/15/2021","6/17/2021")
+rate_table<-rate_table[,c("cohort","lottery_date","pre_rate","jump","post_rate_change")]
+
+kable(rate_table)
+```
+
+
+
+## Difference in rates (Lottery state minus non-lottery states)  
+```{r diff_rate_table}
+Combined_diff_rate<-cbind.data.frame(round(fixef(mod_Combined_diff_rate),1),
+round(intervals(mod_Combined_diff_rate)$fixed,1)[,c(1,3)]) 
+Combined_diff_rate <- Combined_diff_rate %>% rename(beta=colnames(Combined_diff_rate[1]), low=colnames(Combined_diff_rate[2]), high=colnames(Combined_diff_rate[3]))
+Combined_diff_rate$effect=paste(Combined_diff_rate$beta, "(",Combined_diff_rate$low, ",", Combined_diff_rate$high, ")")
+Combined_diff_rate<-t(Combined_diff_rate[,c("effect")])
+
+CO_diff_rate<-cbind.data.frame(round(coef(mod_CO_diff_rate),1),
+round(confint(mod_CO_diff_rate),1)) 
+CO_diff_rate <- CO_diff_rate %>% rename(beta=colnames(CO_diff_rate[1]), low=colnames(CO_diff_rate[2]), high=colnames(CO_diff_rate[3]))
+CO_diff_rate$effect=paste(CO_diff_rate$beta, "(",CO_diff_rate$low, ",", CO_diff_rate$high, ")")
+CO_diff_rate<-t(CO_diff_rate[,c("effect")])
+
+DE_diff_rate<-cbind.data.frame(round(coef(mod_DE_diff_rate),1),
+round(confint(mod_DE_diff_rate),1)) 
+DE_diff_rate <- DE_diff_rate %>% rename(beta=colnames(DE_diff_rate[1]), low=colnames(DE_diff_rate[2]), high=colnames(DE_diff_rate[3]))
+DE_diff_rate$effect=paste(DE_diff_rate$beta, "(",DE_diff_rate$low, ",", DE_diff_rate$high, ")")
+DE_diff_rate<-t(DE_diff_rate[,c("effect")])
+
+CA_diff_rate<-cbind.data.frame(round(coef(mod_CA_diff_rate),1),
+round(confint(mod_CA_diff_rate),1)) 
+CA_diff_rate <- CA_diff_rate %>% rename(beta=colnames(CA_diff_rate[1]), low=colnames(CA_diff_rate[2]), high=colnames(CA_diff_rate[3]))
+CA_diff_rate$effect=paste(CA_diff_rate$beta, "(",CA_diff_rate$low, ",", CA_diff_rate$high, ")")
+CA_diff_rate<-t(CA_diff_rate[,c("effect")])
+
+NM_diff_rate<-cbind.data.frame(round(coef(mod_NM_diff_rate),1),
+round(confint(mod_NM_diff_rate),1)) 
+NM_diff_rate <- NM_diff_rate %>% rename(beta=colnames(NM_diff_rate[1]), low=colnames(NM_diff_rate[2]), high=colnames(NM_diff_rate[3]))
+NM_diff_rate$effect=paste(NM_diff_rate$beta, "(",NM_diff_rate$low, ",", NM_diff_rate$high, ")")
+NM_diff_rate<-t(NM_diff_rate[,c("effect")])
+
+WV_diff_rate<-cbind.data.frame(round(coef(mod_WV_diff_rate),1),
+round(confint(mod_WV_diff_rate),1)) 
+WV_diff_rate <- WV_diff_rate %>% rename(beta=colnames(WV_diff_rate[1]), low=colnames(WV_diff_rate[2]), high=colnames(WV_diff_rate[3]))
+WV_diff_rate$effect=paste(WV_diff_rate$beta, "(",WV_diff_rate$low, ",", WV_diff_rate$high, ")")
+WV_diff_rate<-t(WV_diff_rate[,c("effect")])
+
+AR_diff_rate<-cbind.data.frame(round(coef(mod_AR_diff_rate),1),
+round(confint(mod_AR_diff_rate),1)) 
+AR_diff_rate <- AR_diff_rate %>% rename(beta=colnames(AR_diff_rate[1]), low=colnames(AR_diff_rate[2]), high=colnames(AR_diff_rate[3]))
+AR_diff_rate$effect=paste(AR_diff_rate$beta, "(",AR_diff_rate$low, ",", AR_diff_rate$high, ")")
+AR_diff_rate<-t(AR_diff_rate[,c("effect")])
+
+WA_diff_rate<-cbind.data.frame(round(coef(mod_WA_diff_rate),1),
+round(confint(mod_WA_diff_rate),1)) 
+WA_diff_rate <- WA_diff_rate %>% rename(beta=colnames(WA_diff_rate[1]), low=colnames(WA_diff_rate[2]), high=colnames(WA_diff_rate[3]))
+WA_diff_rate$effect=paste(WA_diff_rate$beta, "(",WA_diff_rate$low, ",", WA_diff_rate$high, ")")
+WA_diff_rate<-t(WA_diff_rate[,c("effect")])
+
+KY_diff_rate<-cbind.data.frame(round(coef(mod_KY_diff_rate),1),
+round(confint(mod_KY_diff_rate),1)) 
+KY_diff_rate <- KY_diff_rate %>% rename(beta=colnames(KY_diff_rate[1]), low=colnames(KY_diff_rate[2]), high=colnames(KY_diff_rate[3]))
+KY_diff_rate$effect=paste(KY_diff_rate$beta, "(",KY_diff_rate$low, ",", KY_diff_rate$high, ")")
+KY_diff_rate<-t(KY_diff_rate[,c("effect")])
+
+NC_diff_rate<-cbind.data.frame(round(coef(mod_NC_diff_rate),1),
+round(confint(mod_NC_diff_rate),1)) 
+NC_diff_rate <- NC_diff_rate %>% rename(beta=colnames(NC_diff_rate[1]), low=colnames(NC_diff_rate[2]), high=colnames(NC_diff_rate[3]))
+NC_diff_rate$effect=paste(NC_diff_rate$beta, "(",NC_diff_rate$low, ",", NC_diff_rate$high, ")")
+NC_diff_rate<-t(NC_diff_rate[,c("effect")])
+
+MA_diff_rate<-cbind.data.frame(round(coef(mod_MA_diff_rate),1),
+round(confint(mod_MA_diff_rate),1)) 
+MA_diff_rate <- MA_diff_rate %>% rename(beta=colnames(MA_diff_rate[1]), low=colnames(MA_diff_rate[2]), high=colnames(MA_diff_rate[3]))
+MA_diff_rate$effect=paste(MA_diff_rate$beta, "(",MA_diff_rate$low, ",", MA_diff_rate$high, ")")
+MA_diff_rate<-t(MA_diff_rate[,c("effect")])
+
+ME_diff_rate<-cbind.data.frame(round(coef(mod_ME_diff_rate),1),
+round(confint(mod_ME_diff_rate),1)) 
+ME_diff_rate <- ME_diff_rate %>% rename(beta=colnames(ME_diff_rate[1]), low=colnames(ME_diff_rate[2]), high=colnames(ME_diff_rate[3]))
+ME_diff_rate$effect=paste(ME_diff_rate$beta, "(",ME_diff_rate$low, ",", ME_diff_rate$high, ")")
+ME_diff_rate<-t(ME_diff_rate[,c("effect")])
+
+IL_diff_rate<-cbind.data.frame(round(coef(mod_IL_diff_rate),1),
+round(confint(mod_IL_diff_rate),1)) 
+IL_diff_rate <- IL_diff_rate %>% rename(beta=colnames(IL_diff_rate[1]), low=colnames(IL_diff_rate[2]), high=colnames(IL_diff_rate[3]))
+IL_diff_rate$effect=paste(IL_diff_rate$beta, "(",IL_diff_rate$low, ",", IL_diff_rate$high, ")")
+IL_diff_rate<-t(IL_diff_rate[,c("effect")])
+
+LA_diff_rate<-cbind.data.frame(round(coef(mod_LA_diff_rate),1),
+round(confint(mod_LA_diff_rate),1)) 
+LA_diff_rate <- LA_diff_rate %>% rename(beta=colnames(LA_diff_rate[1]), low=colnames(LA_diff_rate[2]), high=colnames(LA_diff_rate[3]))
+LA_diff_rate$effect=paste(LA_diff_rate$beta, "(",LA_diff_rate$low, ",", LA_diff_rate$high, ")")
+LA_diff_rate<-t(LA_diff_rate[,c("effect")])
+
+NV_diff_rate<-cbind.data.frame(round(coef(mod_NV_diff_rate),1),
+round(confint(mod_NV_diff_rate),1)) 
+NV_diff_rate <- NV_diff_rate %>% rename(beta=colnames(NV_diff_rate[1]), low=colnames(NV_diff_rate[2]), high=colnames(NV_diff_rate[3]))
+NV_diff_rate$effect=paste(NV_diff_rate$beta, "(",NV_diff_rate$low, ",", NV_diff_rate$high, ")")
+NV_diff_rate<-t(NV_diff_rate[,c("effect")])
+
+MI_diff_rate<-cbind.data.frame(round(coef(mod_MI_diff_rate),1),
+round(confint(mod_MI_diff_rate),1)) 
+MI_diff_rate <- MI_diff_rate %>% rename(beta=colnames(MI_diff_rate[1]), low=colnames(MI_diff_rate[2]), high=colnames(MI_diff_rate[3]))
+MI_diff_rate$effect=paste(MI_diff_rate$beta, "(",MI_diff_rate$low, ",", MI_diff_rate$high, ")")
+MI_diff_rate<-t(MI_diff_rate[,c("effect")])
+
+COs_diff_rate<-cbind.data.frame(round(coef(mod_COs_diff_rate),1),
+round(confint(mod_COs_diff_rate),1)) 
+COs_diff_rate <- COs_diff_rate %>% rename(beta=colnames(COs_diff_rate[1]), low=colnames(COs_diff_rate[2]), high=colnames(COs_diff_rate[3]))
+COs_diff_rate$effect=paste(COs_diff_rate$beta, "(",COs_diff_rate$low, ",", COs_diff_rate$high, ")")
+COs_diff_rate<-t(COs_diff_rate[,c("effect")])
+
+DEs_diff_rate<-cbind.data.frame(round(coef(mod_DEs_diff_rate),1),
+round(confint(mod_DEs_diff_rate),1)) 
+DEs_diff_rate <- DEs_diff_rate %>% rename(beta=colnames(DEs_diff_rate[1]), low=colnames(DEs_diff_rate[2]), high=colnames(DEs_diff_rate[3]))
+DEs_diff_rate$effect=paste(DEs_diff_rate$beta, "(",DEs_diff_rate$low, ",", DEs_diff_rate$high, ")")
+DEs_diff_rate<-t(DEs_diff_rate[,c("effect")])
+
+CAs_diff_rate<-cbind.data.frame(round(coef(mod_CAs_diff_rate),1),
+round(confint(mod_CAs_diff_rate),1)) 
+CAs_diff_rate <- CAs_diff_rate %>% rename(beta=colnames(CAs_diff_rate[1]), low=colnames(CAs_diff_rate[2]), high=colnames(CAs_diff_rate[3]))
+CAs_diff_rate$effect=paste(CAs_diff_rate$beta, "(",CAs_diff_rate$low, ",", CAs_diff_rate$high, ")")
+CAs_diff_rate<-t(CAs_diff_rate[,c("effect")])
+
+MAs_diff_rate<-cbind.data.frame(round(coef(mod_MAs_diff_rate),1),
+round(confint(mod_MAs_diff_rate),1)) 
+MAs_diff_rate <- MAs_diff_rate %>% rename(beta=colnames(MAs_diff_rate[1]), low=colnames(MAs_diff_rate[2]), high=colnames(MAs_diff_rate[3]))
+MAs_diff_rate$effect=paste(MAs_diff_rate$beta, "(",MAs_diff_rate$low, ",", MAs_diff_rate$high, ")")
+MAs_diff_rate<-t(MAs_diff_rate[,c("effect")])
+
+NVs_diff_rate<-cbind.data.frame(round(coef(mod_NVs_diff_rate),1),
+round(confint(mod_NVs_diff_rate),1)) 
+NVs_diff_rate <- NVs_diff_rate %>% rename(beta=colnames(NVs_diff_rate[1]), low=colnames(NVs_diff_rate[2]), high=colnames(NVs_diff_rate[3]))
+NVs_diff_rate$effect=paste(NVs_diff_rate$beta, "(",NVs_diff_rate$low, ",", NVs_diff_rate$high, ")")
+NVs_diff_rate<-t(NVs_diff_rate[,c("effect")])
+
+diff_rate_table<-as.data.frame(rbind(Combined_diff_rate[,2:4], CO_diff_rate[,2:4], DE_diff_rate[,2:4], CA_diff_rate[,2:4], NM_diff_rate[,2:4], WV_diff_rate[,2:4], AR_diff_rate[,2:4], WA_diff_rate[,2:4], KY_diff_rate[,2:4], NC_diff_rate[,2:4], MA_diff_rate[,2:4], ME_diff_rate[,2:4], IL_diff_rate[,2:4], LA_diff_rate[,2:4], NV_diff_rate[,2:4], MI_diff_rate[,2:4], COs_diff_rate[,2:4], DEs_diff_rate[,2:4], CAs_diff_rate[,2:4], MAs_diff_rate[,2:4], NVs_diff_rate[,2:4])) %>% rename(pre_diff_rate=V1, jump=V2, post_diff_rate_change=V3)
+diff_rate_table$cohort<-c("Combined", "Colorado", "Delaware", "California", "New Mexico", "West Virginia", "Arkansas", "Washington", "Kentucky", "North Carolina", "Massachusetts", "Maine", "Illinois", "Louisiana", "Nevada", "Michigan", "Colorado state data", "Delaware state data", "California state data", "Massachusetts state data", "Nevada state data")
+diff_rate_table$lottery_date<-c("NA","5/25/2021", "5/25/2021", "5/27/2021","6/1/2021","6/1/2021","6/1/2021","6/3/2021","6/4/2021","6/10/2021","6/15/2021", "6/16/2021", "6/17/2021","6/17/2021","6/17/2021","7/1/2021", "5/25/2021", "5/25/2021", "5/27/2021", "6/15/2021","6/17/2021")
+diff_rate_table<-diff_rate_table[,c("cohort","lottery_date","pre_diff_rate","jump","post_diff_rate_change")]
+
+kable(diff_rate_table)
+
+#P-VALUES FOR PRIMARY ANALYSIS  
+round(anova(mod_Combined_diff_rate)[3:4,4],2)
+```
+
