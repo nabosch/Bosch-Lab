@@ -166,8 +166,8 @@ fig1<-ggplot(ds8, aes(x=time, y=rate, color=cohort))+
     panel.background = element_blank(),
     legend.position = "none",
         text = element_text(size=20),
-    strip.text = element_text(size = 20))+
-  facet_wrap(~ state)
+    strip.text = element_text(size = 15))+
+  facet_wrap(~ state, ncol=7)
 fig1
 
 ggsave("rate_by_state.tiff", width=20, height=10)
@@ -191,8 +191,8 @@ fig2<-ggplot(ds7, aes(x=time, y=diff_rate))+
     panel.background = element_blank(),
     legend.position = "none",
     text = element_text(size=20),
-    strip.text = element_text(size = 20))+
-  facet_wrap(~ state)
+    strip.text = element_text(size = 15))+
+  facet_wrap(~ state, ncol=7)
 fig2
 
 ggsave("diff_rate_by_state.tiff", width=20, height=10)
@@ -200,8 +200,9 @@ ggsave("diff_rate_by_state.tiff", width=20, height=10)
 
 ## Combined figure  
 ```{r combined figure}
-fig<-ggarrange(fig1, fig2, ncol=1, nrow=2, labels= c("A","B"), font.label = list(size = 20))
+fig<-ggarrange(fig1, NULL, fig2, ncol=1, nrow=3, labels= c("A", "","B"), heights = c(1, 0.10, 1), font.label = list(size = 20))
 fig
+
 ggsave("fig.tiff", width=20, height=20)
 ggsave("fig.jpeg", width=20, height=20)
 ```
