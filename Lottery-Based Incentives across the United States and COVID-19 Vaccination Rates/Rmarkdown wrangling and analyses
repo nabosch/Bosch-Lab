@@ -137,7 +137,7 @@ ds4<-ds3[!is.na(ds3$diff_rate),]
 # RESTRICTING TO WITHIN 28 DAYS OF LOTTERY ANNOUNCEMENT
 ds5<-ds4[ds4$time>=-28 & ds4$time<=28,]
 
-# CREATING DATASET FOR COMBINED STATE ANALYSIS AND SENSITIVITY ANALYSES
+# CREATING DATASETS FOR COMBINED STATE ANALYSIS AND SENSITIVITY ANALYSES
 ds6_main<-ds5[ds5$state %in% c("Colorado", "Delaware","California","New Mexico","West Virginia","Arkansas","Washington","Kentucky","North Carolina","Massachusetts", "Maine", "Illinois","Louisiana","Nevada","Michigan"),] %>% group_by(time) %>% summarize(Daily_Admin=sum(Daily_Admin), Pop=sum(Pop), prepost=max(prepost),timepost=max(timepost), nlot_admin=sum(nlot_admin), nlot_pop=sum(nlot_pop)) %>% mutate(rate=(Daily_Admin/Pop)*100000, nlot_rate=(nlot_admin/nlot_pop)*100000) %>% mutate(diff_rate=rate-nlot_rate)
 
 ds6_sensitivity<-ds5[ds5$state %in% c("Colorado", "Delaware","California","New Mexico","West Virginia","Arkansas","Washington","Kentucky","North Carolina","Massachusetts", "Maine", "Illinois","Louisiana","Nevada","Michigan"),] %>% group_by(time) %>% summarize(Daily_Admin=sum(Daily_Admin), Pop=sum(Pop), prepost=max(prepost),timepost=max(timepost), nlot_admin=sum(nlot_admin), nlot_pop=sum(nlot_pop)) %>% mutate(rate=(Daily_Admin/Pop)*100000, nlot_rate=(nlot_admin/nlot_pop)*100000) %>% mutate(diff_rate=rate-nlot_rate)
@@ -145,7 +145,7 @@ ds6_sensitivity<-ds5[ds5$state %in% c("Colorado", "Delaware","California","New M
 # ADDING COMBINED DATASET TO STATE DATASET FOR FIGURE
 ds6_main$state<-"Combined"
 ds6_sensitivity$state<-"Combined sensitivity analysis"
-ds7<-rbind(ds6_main[,c("state","time","prepost","timepost", "nlot_rate", "rate", "diff_rate")], ds6_sensitivity[,c("state","time","prepost","timepost", "nlot_rate", "rate", "diff_rate")], ds5[ds5$state %in% c("Colorado", "Delaware","California","New Mexico","West Virginia","Arkansas","Washington","Kentucky","North Carolina","Massachusetts", "Maine", "Illinois","Louisiana","Nevada","Michigan"),c("state","time", "prepost","timepost", "rate", "nlot_rate","diff_rate")]) %>% mutate(state=factor(state, levels=c("Combined","Colorado", "Delaware","California","New Mexico","West Virginia","Arkansas","Washington","Kentucky","North Carolina","Massachusetts", "Maine", "Illinois","Louisiana","Nevada","Michigan","Combined sensitivity analysis")))
+ds7<-rbind(ds6_main[,c("state","time","prepost","timepost", "nlot_rate", "rate", "diff_rate")], ds6_sensitivity[,c("state","time","prepost","timepost", "nlot_rate", "rate", "diff_rate")], ds5[ds5$state %in% c("Colorado", "Delaware","California","New Mexico","West Virginia","Arkansas","Washington","Kentucky","North Carolina","Massachusetts", "Maine", "Illinois","Louisiana","Nevada","Michigan"),c("state","time", "prepost","timepost", "rate", "nlot_rate","diff_rate")]) %>% mutate(state=factor(state, labels=c("15 Lottery states combined, CDC data","5 Lottery states combined, state data (sensitivity)","Colorado", "Delaware","California","New Mexico","West Virginia","Arkansas","Washington","Kentucky","North Carolina","Massachusetts", "Maine", "Illinois","Louisiana","Nevada","Michigan"), levels=c("Combined","Combined sensitivity analysis","Colorado", "Delaware","California","New Mexico","West Virginia","Arkansas","Washington","Kentucky","North Carolina","Massachusetts", "Maine", "Illinois","Louisiana","Nevada","Michigan")))
 ds8<-pivot_longer(ds7, cols=c(rate, nlot_rate), names_to="cohort", values_to="rate")
 ```
 
@@ -162,18 +162,24 @@ fig1<-ggplot(ds8, aes(x=time, y=rate, color=cohort))+
   geom_smooth(data=subset(ds8, prepost==1), se=T, method="lm")+
   coord_cartesian(y=c(0,500))+
   scale_x_continuous(breaks=c(-28,-21,-14,-7,0,7,14,21,28), labels=c("-4","-3","-2","-1","0","1","2","3","4"))+
-  theme(axis.line = element_line(colour = "black"),
+  scale_color_hue(labels = c("Non-lottery states", "Lottery states"))+
+  theme(
+    legend.position = c(.91, .10),
+    legend.title=element_blank(),
+    legend.text=element_text(size=20),
+    legend.background = element_rect(fill="white", size=0.5, linetype="solid", colour ="black"),
+    axis.line = element_line(colour = "black"),
     panel.grid.major = element_blank(),
     panel.grid.minor = element_blank(),
     panel.border = element_blank(),
     panel.background = element_blank(),
-    legend.position = "none",
         text = element_text(size=20),
-    strip.text = element_text(size = 15))+
+    strip.text = element_text(size = 10))+
   facet_wrap(~ state, ncol=6)
 fig1
 
 ggsave("rate_by_state.tiff", width=20, height=10)
+ggsave("rate_by_state.jpeg", width=20, height=10)
 ```
 
 
