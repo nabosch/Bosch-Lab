@@ -140,7 +140,7 @@ ds5<-ds4[ds4$time>=-28 & ds4$time<=28,]
 # CREATING DATASETS FOR COMBINED STATE ANALYSIS AND SENSITIVITY ANALYSES
 ds6_main<-ds5[ds5$state %in% c("Colorado", "Delaware","California","New Mexico","West Virginia","Arkansas","Washington","Kentucky","North Carolina","Massachusetts", "Maine", "Illinois","Louisiana","Nevada","Michigan"),] %>% group_by(time) %>% summarize(Daily_Admin=sum(Daily_Admin), Pop=sum(Pop), prepost=max(prepost),timepost=max(timepost), nlot_admin=sum(nlot_admin), nlot_pop=sum(nlot_pop)) %>% mutate(rate=(Daily_Admin/Pop)*100000, nlot_rate=(nlot_admin/nlot_pop)*100000) %>% mutate(diff_rate=rate-nlot_rate)
 
-ds6_sensitivity<-ds5[ds5$state %in% c("Colorado", "Delaware","California","New Mexico","West Virginia","Arkansas","Washington","Kentucky","North Carolina","Massachusetts", "Maine", "Illinois","Louisiana","Nevada","Michigan"),] %>% group_by(time) %>% summarize(Daily_Admin=sum(Daily_Admin), Pop=sum(Pop), prepost=max(prepost),timepost=max(timepost), nlot_admin=sum(nlot_admin), nlot_pop=sum(nlot_pop)) %>% mutate(rate=(Daily_Admin/Pop)*100000, nlot_rate=(nlot_admin/nlot_pop)*100000) %>% mutate(diff_rate=rate-nlot_rate)
+ds6_sensitivity<-ds5[ds5$state %in% c("Colorado state data", "Delaware state data","California state data","Massachusetts state data","Nevada state data"),] %>% group_by(time) %>% summarize(Daily_Admin=sum(Daily_Admin), Pop=sum(Pop), prepost=max(prepost),timepost=max(timepost), nlot_admin=sum(nlot_admin), nlot_pop=sum(nlot_pop)) %>% mutate(rate=(Daily_Admin/Pop)*100000, nlot_rate=(nlot_admin/nlot_pop)*100000) %>% mutate(diff_rate=rate-nlot_rate)
 
 # ADDING COMBINED DATASET TO STATE DATASET FOR FIGURE
 ds6_main$state<-"Combined"
