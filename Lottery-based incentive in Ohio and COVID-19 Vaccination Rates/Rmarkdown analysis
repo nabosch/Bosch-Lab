@@ -133,9 +133,9 @@ ggsave("jama_fig1b_adults_diff.tiff")
 ## Assess for autocorrelation
 
 ```{r autocorrelation}
-durbinWatsonTest(lm(rateoh_adult~timepre+timepost+dayofweek, ds3), max.lag=7)
-durbinWatsonTest(lm(rateusnl_adult~timepre+timepost+dayofweek, ds3), max.lag=7)
-durbinWatsonTest(lm(ratediff_adult~timepre+timepost+prepost+dayofweek, ds3), max.lag=7)
+durbinWatsonTest(lm(rateoh_adult~timepre+timepost+dayofweek, ds3), max.lag1)
+durbinWatsonTest(lm(rateusnl_adult~timepre+timepost+dayofweek, ds3), max.lag=1)
+durbinWatsonTest(lm(ratediff_adult~timepre+timepost+prepost+dayofweek, ds3), max.lag=1)
 ```
 
 # Adults
