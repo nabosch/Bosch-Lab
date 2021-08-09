@@ -1,0 +1,189 @@
+---
+title: "Ohio Vaccine Lottery"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: united
+---
+
+
+```{r setup, include=FALSE}
+library(tidyr)
+library(dplyr)
+library(ggplot2)
+library(ggtext)
+library(car)
+library(nlme)
+library(knitr)
+library(gridExtra)
+library(grid)
+knitr::opts_chunk$set(echo = TRUE)
+Sys.setenv(TZ = "EST")
+```
+
+# Dataset Setup
+## Import
+```{r import}
+ds<-read.csv(file="COVID-19_Vaccinations_in_the_United_States_Jurisdiction.csv", stringsAsFactors = FALSE)
+```
+
+## Wrangling 
+US states with a cash prize lottery system only for people who get vaccines (excludes states offering scratcher tickets available to non-vaccinated people) had data censored the day before the state lottery system was announced (e.g., California announced a lottery on 5/27/2021 so the last day included in the dataset for California was 5/26/2021)
+
+List of vaccine lottery and announcement dates:  
+AK 5/25/2021  
+CA 5/27/2021  
+CO 5/25/2021  
+DE 5/25/2021  
+KY 6/4/2021  
+MD 5/20/2021  
+NM 6/1/2021  
+OR 5/21/2021  
+WA 6/3/2021  
+WV 6/1/2021    
+
+```{r wrangling}
+# Format date
+ds$date<-as.Date(ds$Date, format="%m/%d/%Y")
+
+# Define first dose vaccine per day from cumulative dose and define population using administered and administered/100K data to extrapolate 
+ds<-ds %>% group_by(Location) %>% arrange(as.numeric(date)) %>% mutate(vax=Administered_Dose1_Recip-lag(Administered_Dose1_Recip), pop=(Administered*100000)/Admin_Per_100K,vax_adult=Administered_Dose1_Recip_18Plus-lag(Administered_Dose1_Recip_18Plus), pop_adult=(Administered_18Plus*100000)/Admin_Per_100k_18Plus) 
+ds1<-ds[ds$date>=as.Date("04/15/2021", format="%m/%d/%Y") & ds$date<=as.Date("06/09/2021", format="%m/%d/%Y"),c("date","Location","vax","vax_adult","pop","pop_adult")]
+
+# Separate Ohio and US and create first vax dose per day per 100K 
+oh<-ds1[ds1$Location=="OH",] %>% mutate(vaxoh=vax, vaxoh_adult=vax_adult, rateoh=(vax/pop)*100000, rateoh_adult=(vax_adult/pop_adult)*100000)
+ds2<-ds1[!(ds1$Location=="CA" & ds1$date>=as.Date("2021/05/27", format="%Y/%m/%d")) & !(ds1$Location=="AK" & ds1$date>=as.Date("2021/05/25", format="%Y/%m/%d")) & !(ds1$Location=="CO" & ds1$date>=as.Date("2021/05/25", format="%Y/%m/%d")) & !(ds1$Location=="DE" & ds1$date>=as.Date("2021/05/25", format="%Y/%m/%d")) & !(ds1$Location=="KY" & ds1$date>=as.Date("2021/06/04", format="%Y/%m/%d")) & !(ds1$Location=="MD" & ds1$date>=as.Date("2021/05/20", format="%Y/%m/%d")) & !(ds1$Location=="NM" & ds1$date>=as.Date("2021/06/01", format="%Y/%m/%d")) & !(ds1$Location=="OR" & ds1$date>=as.Date("2021/05/21", format="%Y/%m/%d")) & !(ds1$Location=="WA" & ds1$date>=as.Date("2021/06/03", format="%Y/%m/%d")) & !(ds1$Location=="WV" & ds1$date>=as.Date("2021/06/01", format="%Y/%m/%d")),]
+usnl<-ds2[ds2$Location %in% c("AL","AK","AZ","AR","CA","CO","CT","DC","DE","FL","GA","HI","ID","IL","IN","IA","KS","KY","LA","ME","MA","MD","MI","MN","MS","MO","MT","NE","NV","NH","NJ","NY","NM","NC","ND","OK","OR","PA","RI","SC","SD","TN","TX","UT","VT","VA","VI","WA","WV","WI","WY") & !is.na(ds2$pop) & !is.na(ds2$pop_adult) & !is.infinite(ds2$pop) & !is.infinite(ds2$pop_adult),] %>% group_by(date) %>% summarise(vaxusnl=sum(vax), vaxusnl_adult=sum(vax_adult), popusnl=sum(pop), popusnl_adult=sum(pop_adult))
+usnl$rateusnl<-(usnl$vaxusnl/usnl$popusnl)*100000
+usnl$rateusnl_adult<-(usnl$vaxusnl_adult/usnl$popusnl_adult)*100000
+
+# Create analysis dataset
+ds3<-cbind(oh[,c("date","vaxoh","vaxoh_adult","rateoh","rateoh_adult")], usnl[,c("vaxusnl","vaxusnl_adult","rateusnl","rateusnl_adult")])
+
+# Format variables
+ds3$time<-1:nrow(ds3)
+ds3$prepost<-0
+ds3$prepost[ds3$time>=29]<-1
+ds3$timepost[ds3$prepost==0]<-0
+ds3$timepost[ds3$prepost==1]<-ds3$time[ds3$prepost==1]-28
+ds3$timepre[ds3$prepost==0]<-ds3$time[ds3$prepost==0]
+ds3$timepre[ds3$prepost==1]<-ds3$time[ds3$prepost==1]
+ds3$ratediff<-ds3$rateusnl-ds3$rateoh
+ds3$ratediff_adult<-ds3$rateusnl_adult-ds3$rateoh_adult
+ds3$dayofweek<-c(5:7,1:7,1:7,1:7,1:7,1:7,1:7,1:7,1:4)
+ds3$dayofweek<-factor(ds3$dayofweek)
+ds3$prepost<-factor(ds3$prepost)
+```
+
+## Vizualization
+Adults only, blue is US, red is Ohio, grey shaded areas are 95% confidence intervals; dotted line delineates May 12th  
+
+```{r visualization}
+ohus_adult<-gather(ds3, "cohort","rate",c(5,9))
+ohus_adult$cohort<-factor(ohus_adult$cohort)
+fig_ohus<-ggplot(ohus_adult, aes(x=time, y=rate, color=cohort))+
+  scale_colour_discrete(labels = c("Ohio", "United States"))+
+  geom_point()+
+  geom_vline(xintercept=28, linetype="dotted", size=1)+
+  ylab("Vaccination Rate/100,000")+
+  xlab("Day")+
+  geom_smooth(data=subset(ohus_adult, prepost==0), se=T, level=0.95, method="lm")+
+  geom_smooth(data=subset(ohus_adult, prepost==1), se=T, level=0.95, method="lm")+
+  scale_x_continuous(breaks=c(1,28,56), labels=c("Apr 15","May 12","June 9"))+
+  theme(legend.position = c(.80, .95), legend.title=element_blank())+theme(axis.line = element_line(colour = "black"),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.border = element_blank(),
+    panel.background = element_blank())+
+  geom_textbox(label="Ohio Vaccine Lottery Announcement", x=28, y=580, color="black", width=0.25, halign=0.5)+
+  coord_cartesian(y=c(0,700))+
+  annotate("text", x=1, y=0, label= "1a", fontface=2)
+fig_ohus
+
+ggsave("jama_fig1a_adults.tiff")
+
+ds3$color<-"black"
+fig_diff<-ggplot(ds3, aes(x=time, y=ratediff_adult, color=color))+
+  scale_colour_manual(labels = c("Difference in vaccination rates between US and OH"),values=c("purple"))+
+  geom_point()+
+  geom_vline(xintercept=28, linetype="dotted", size=1)+
+  ylab("Vaccination Rate/100,000")+
+  xlab("Day")+geom_point()+geom_vline(xintercept=28, linetype="dotted", size=1)+
+  ylab("Vaccination Rate/100,000")+
+  xlab("Day")+
+  geom_smooth(data=subset(ds3, prepost==0), se=T, level=0.95, method="lm")+
+  geom_smooth(data=subset(ds3, prepost==1), se=T, level=0.95, method="lm")+
+  scale_x_continuous(breaks=c(1,28,56), labels=c("Apr 15","May 12","June 9"))+
+  geom_textbox(label="Ohio Vaccine Lottery Announcement", x=28, y=220, color="black", width=0.25, halign=0.5)+
+  coord_cartesian(y=c(-100,300))+
+  theme(legend.position = c(.75, .95), legend.title=element_blank())+theme(axis.line = element_line(colour = "black"),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.border = element_blank(),
+    panel.background = element_blank())+
+  annotate("text", x=1, y=-100, label= "1b", fontface=2)
+fig_diff
+
+ggsave("jama_fig1b_adults_diff.tiff")
+
+```
+
+## Assess for autocorrelation
+
+```{r autocorrelation}
+durbinWatsonTest(lm(rateoh_adult~timepre+timepost+dayofweek, ds3), max.lag=7)
+durbinWatsonTest(lm(rateusnl_adult~timepre+timepost+dayofweek, ds3), max.lag=7)
+durbinWatsonTest(lm(ratediff_adult~timepre+timepost+prepost+dayofweek, ds3), max.lag=7)
+```
+
+# Adults
+
+## Ohio Rate w/ first order autocorrelation and adjusting for day of week  
+```{r ohio_rate_adult}
+mod_rateoh1<-nlme::gls(rateoh_adult~timepre+prepost+timepost+dayofweek, ds3, correlation=corAR1(form=~time), na.action=na.omit, method="ML")
+summary(mod_rateoh1)
+confint(mod_rateoh1)
+```
+## US Rate w/ first order autocorrelation and adjusting for day of week  
+```{r us_rate_adult}
+mod_rateusnl1<-nlme::gls(rateusnl_adult~timepre+prepost+timepost+dayofweek, ds3, correlation=corAR1(form=~time), na.action=na.omit, method="ML")
+summary(mod_rateusnl1)
+confint(mod_rateusnl1)
+```
+
+
+## Rate diff w/ first order autocorrelation and adjusting for day of week  
+```{r ratediff_adult}
+mod_ratediff1<-nlme::gls(ratediff_adult~timepre+prepost+timepost+dayofweek, ds3, correlation=corAR1(form=~time), na.action=na.omit, method="ML")
+summary(mod_ratediff1)
+confint(mod_ratediff1)
+```
+
+# Table
+```{r table}
+ohio_table<-cbind(
+  round(coef(mod_rateoh1)[2],0),round(confint(mod_rateoh1)[2,1],0),round(confint(mod_rateoh1)[2,2],0),round(summary(mod_rateoh1)$tTable[2,4],3),
+  round(coef(mod_rateoh1)[3],0),round(confint(mod_rateoh1)[3,1],0),round(confint(mod_rateoh1)[3,2],0),round(summary(mod_rateoh1)$tTable[3,4],3),
+  round(coef(mod_rateoh1)[4],0),round(confint(mod_rateoh1)[4,1],0),round(confint(mod_rateoh1)[4,2],0),round(summary(mod_rateoh1)$tTable[4,4],3)
+  )
+
+usnl_table<-cbind(
+  round(coef(mod_rateusnl1)[2],0),round(confint(mod_rateusnl1)[2,1],0),round(confint(mod_rateusnl1)[2,2],0),round(summary(mod_rateusnl1)$tTable[2,4],3),
+  round(coef(mod_rateusnl1)[3],0),round(confint(mod_rateusnl1)[3,1],0),round(confint(mod_rateusnl1)[3,2],0),round(summary(mod_rateusnl1)$tTable[3,4],3),
+  round(coef(mod_rateusnl1)[4],0),round(confint(mod_rateusnl1)[4,1],0),round(confint(mod_rateusnl1)[4,2],0),round(summary(mod_rateusnl1)$tTable[4,4],3)
+  )
+
+ratediff_table<-cbind(
+  round(coef(mod_ratediff1)[2],0),round(confint(mod_ratediff1)[2,1],0),round(confint(mod_ratediff1)[2,2],0),round(summary(mod_ratediff1)$tTable[2,4],3),
+  round(coef(mod_ratediff1)[3],0),round(confint(mod_ratediff1)[3,1],0),round(confint(mod_ratediff1)[3,2],0),round(summary(mod_ratediff1)$tTable[3,4],3),
+  round(coef(mod_ratediff1)[4],0),round(confint(mod_ratediff1)[4,1],0),round(confint(mod_ratediff1)[4,2],0),round(summary(mod_ratediff1)$tTable[4,4],3)
+  )
+
+vars<-c("prelottery trend estimate","prelottery trend CI low", "prelottery trend CI high", "prelottery trend p","lottery estimate","lottery CI low","lottery CI high"," lottery p","postlottery change trend estimate","postlottery change trend CI low","postlottery change trend CI high","postlottery change trend p")
+
+table<-data.frame(rbind(vars, ohio_table, usnl_table, ratediff_table))
+row.names(table)<-c("vars","Ohio"," US"," Ratediff")
+kable(table)
+```
