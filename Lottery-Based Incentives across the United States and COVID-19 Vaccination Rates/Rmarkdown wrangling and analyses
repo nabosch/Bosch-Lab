@@ -311,7 +311,7 @@ diff_rate_table<-diff_rate_table[,c("cohort","pre_diff_rate","jump","post_diff_r
 kable(diff_rate_table)
 
 #P-VALUES FOR PRIMARY ANALYSIS  
-round(anova(mod_Combined_diff_rate)[,6],2)
+summary(mod_Combined_diff_rate)
 ```
 
 
