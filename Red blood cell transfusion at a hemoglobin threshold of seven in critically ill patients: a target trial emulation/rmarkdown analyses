@@ -1,5 +1,5 @@
 ---
-title: "Red blood cell transfusion at a hemoglobin threshold of seven g/dL in critically ill patients: A target trial emulation "
+title: "Red blood cell transfusion at a hemoglobin threshold of seven g/dL in critically ill patients:  A regression discontinuity study"
 date: "`r format(Sys.time(), '%d %B, %Y')`"
 output:
   html_document:
