@@ -12,10 +12,12 @@ output:
 
 # Setup
 ```{r setup, include=FALSE}
-library(dplyr)
-library(ggplot2)
-library(tidyr)
-library(tableone)
+library(tidyverse)
+library(comorbidity)
+library(rdrobust)
+library(table1)
+library(data.table)
+library(ggpubr)
 library(zoo)
 library(epiR)
 library(DescTools)
@@ -23,11 +25,11 @@ library(rdrobust)
 library(rdd)
 library(rddtools)
 library(comorbidity)
-library(EValue)
 library(boot)
 library(knitr)
 library(gridExtra)
 library(grid)
+library(stringr)
 knitr::opts_chunk$set(echo = TRUE)
 Sys.setenv(TZ = "EST")
 set.seed(14)
@@ -154,6 +156,8 @@ mimic3<- mimic2 %>%
 mimic4<-mimic2 %>% 
   left_join(mimic3 %>% select(stay_id, stay_id, time, sofa_co)) %>%
   ungroup()
+
+mimic3$sofa_co[is.na(mimic3$sofa_co)]<-0
          
 # sofa secondary outcome data
 mimic5<- mimic4 %>%
@@ -263,12 +267,14 @@ eicu_icu<-read.csv(file="eicu_icu.csv", stringsAsFactors = FALSE) %>%
   left_join(distinct(read.csv(file="eicu_major_bleeding.csv", stringsAsFactors = FALSE)) %>% rename(stay_id=patientunitstayid)) %>%
   left_join(read.csv(file="eicu_sepsis.csv", stringsAsFactors = FALSE) %>% rename(stay_id=patientunitstayid, sep=sepsis)) %>%
   left_join(read.csv(file="eicu_icd_codes.csv", stringsAsFactors = FALSE) %>%
+              mutate(icd9=str_replace_all(icd9, "[[:punct:]]", "")) %>%
   comorbidity(id="patientunitstayid", code="icd9",icd = "icd9", score="charlson", assign0=TRUE) %>%
     mutate(charlson=score, stay_id=patientunitstayid) %>%
     select(stay_id, ami, charlson)) %>%
   mutate(sep=if_else(!is.na(sep),1,0), mb=if_else(!is.na(mb),1,0)) %>%
   select(subject_id, hadm_id, stay_id, icu_admission_time, icu_discharge_time, age, female, charlson, sep, ami, mb, hospital_expire_flag, hospital_discharge_time, hospitalid, first_careunit) %>%
-  ungroup()
+  ungroup() %>%
+  filter(age>=18)
 
 eicu_hgb<-read.csv(file="eicu_hgb.csv", stringsAsFactors = FALSE) %>%
   rename(stay_id=patientunitstayid) %>%
@@ -492,914 +498,54 @@ e<-eicu22  # main cohort
 
 # joining mimic and eicu data
 ```{r joining}
+set.seed(11182021)
+
 ml<-m %>%
   filter(day>1) %>%
-  ungroup() # late
+  group_by(subject_id) %>%
+  sample_n(1) %>%
+  ungroup() # random hgb sensitivity analysis
 
-el<-e %>%
+el1<-e %>%
   filter(day>1) %>%
-  ungroup() # late
-
-dl<-rbind(ml, el)
-
-mr<-ml %>% 
   group_by(subject_id) %>%
-  arrange(day) %>%
   sample_n(1) %>%
   ungroup() # random hgb sensitivity analysis
- 
-er<-el %>% 
-  group_by(subject_id) %>%
-  arrange(day) %>%
-  sample_n(1) %>%
-  ungroup() # random hgb sensitivity analysis
- 
 
-msep<-ml %>%
-  filter(sep==1) %>%
-  ungroup() # sepsis
+# restricting to hospitals that transfuse from 7 to 6.9
+el<-el1 %>%
+  mutate(count=1) %>%
+  group_by(hospitalid, hgb) %>%
+  summarise(count=sum(count), tx=sum(prbc_ex)) %>%
+  mutate(prop_tx=tx/count) %>%
+  filter(hgb>=6.9 & hgb<=7.0) %>%
+  group_by(hospitalid) %>%
+  mutate(lead_prop_tx=lead(prop_tx)) %>%
+  filter(!is.na(lead_prop_tx)) %>%
+  mutate(discontinuity=prop_tx-lead_prop_tx) %>%
+  filter(discontinuity>0.0) %>%
+  dplyr::select(hospitalid, discontinuity) %>%
+  left_join(el)
 
-mnsep<-ml %>%
-  filter(sep==0) %>%
-  ungroup() # no sepsis
+# adding in prior transfusion in previous day
+ml<- ml %>%
+  left_join(prbc %>% rename(prbc_co=prbc, prbc_co_time=time)) %>%
+  mutate(prbc_co=if_else(prbc_co_time<=time & prbc_co_time>time-1440 & !is.na(prbc_co), 1, 0)) %>%
+  group_by(stay_id) %>%
+  slice(1L) %>%
+  ungroup()
 
-esep<-el %>%
-  filter(sep==1) %>%
-  ungroup() # sepsis
+el<- el %>%
+  left_join(eicu_prbc %>% rename(prbc_co=prbc, prbc_co_time=time)) %>%
+  mutate(prbc_co=if_else(prbc_co_time<=time & prbc_co_time>time-1440 & !is.na(prbc_co), 1, 0)) %>%
+  group_by(stay_id) %>%
+  slice(1L) %>%
+  ungroup()
 
-ensep<-el %>%
-  filter(sep==0) %>%
-  ungroup() # no sepsis
-
-
-mlc<-ml %>%
-  filter(cardiac_icu==1) %>%
-  ungroup() # cardiac icu
-
-mlnc<-ml %>%
-  filter(cardiac_icu==0) %>%
-  ungroup() # cardiac icu
-
-elc<-el %>%
-  filter(cardiac_icu==1) %>%
-  ungroup() # cardiac icu
-
-elnc<-el %>%
-  filter(cardiac_icu==0) %>%
-  ungroup() # cardiac icu
-
-
+write.csv(ml, "ml_12012021.csv", row.names=F)
+write.csv(el, "el_12012021.csv", row.names=F)
 ```
 
-
-
-# models ml
-```{r models ml}
-#exposure
-prbc_ex_ml<-rdrobust(y=ml$prbc_ex, x=ml$hgb, c=7, bwselect="msetwo", cluster=ml$subject_id, all=T)
-
-#pontential confounders
-age_ml<-rdrobust(y=ml$age, x=ml$hgb, c=7, bwselect="msetwo", cluster=ml$subject_id, all=T)
-female_ml<-rdrobust(y=ml$female, x=ml$hgb, c=7, bwselect="msetwo", cluster=ml$subject_id, all=T)
-charlson_ml<-rdrobust(y=ml$charlson, x=ml$hgb, c=7, bwselect="msetwo", cluster=ml$subject_id, all=T)
-sofa_co_ml<-rdrobust(y=ml$sofa_co, x=ml$hgb, c=7, bwselect="msetwo", cluster=ml$subject_id, all=T)
-imv_co_ml<-rdrobust(y=ml$imv_co, x=ml$hgb, c=7, bwselect="msetwo", cluster=ml$subject_id, all=T)
-press_co_ml<-rdrobust(y=ml$press_co, x=ml$hgb, c=7, bwselect="msetwo", cluster=ml$subject_id, all=T)
-
-#primary outcome
-msofa_out_fuzzy_ml<-rdrobust(y=ml$msofa_out, x=ml$hgb, fuzzy=ml$prbc_ex, c=7, bwselect="msetwo", cluster=ml$subject_id, all=T)
-msofa_out_sharp_ml<-rdrobust(y=ml$msofa_out, x=ml$hgb, c=7, bwselect="msetwo", cluster=ml$subject_id, all=T)
-
-#secondary outcomes
-hgb_out_fuzzy_ml<-rdrobust(y=ml$hgb_out, x=ml$hgb, fuzzy=ml$prbc_ex, c=7, bwselect="msetwo", cluster=ml$subject_id, all=T)
-imv_out_fuzzy_ml<-rdrobust(y=ml$imv_out, x=ml$hgb, fuzzy=ml$prbc_ex, c=7, bwselect="msetwo", cluster=ml$subject_id, all=T)
-press_out_fuzzy_ml<-rdrobust(y=ml$press_out, x=ml$hgb, fuzzy=ml$prbc_ex, c=7, bwselect="msetwo", cluster=ml$subject_id, all=T)
-lac_out_fuzzy_ml<-rdrobust(y=ml$lac_out, x=ml$hgb, fuzzy=ml$prbc_ex, c=7, bwselect="msetwo", cluster=ml$subject_id, all=T)
-death_out_fuzzy_ml<-rdrobust(y=ml$death_out, x=ml$hgb, fuzzy=ml$prbc_ex, c=7, bwselect="msetwo", cluster=ml$subject_id, all=T)
-msofa_max_icu_out_fuzzy_ml<-rdrobust(y=ml$msofa_max_icu_out, x=ml$hgb, fuzzy=ml$prbc_ex, c=7, bwselect="msetwo", cluster=ml$subject_id, all=T)
-hgb_out_sharp_ml<-rdrobust(y=ml$hgb_out, x=ml$hgb, c=7, bwselect="msetwo", cluster=ml$subject_id, all=T)
-imv_out_sharp_ml<-rdrobust(y=ml$imv_out, x=ml$hgb, c=7, bwselect="msetwo", cluster=ml$subject_id, all=T)
-press_out_sharp_ml<-rdrobust(y=ml$press_out, x=ml$hgb, c=7, bwselect="msetwo", cluster=ml$subject_id, all=T)
-lac_out_sharp_ml<-rdrobust(y=ml$lac_out, x=ml$hgb, c=7, bwselect="msetwo", cluster=ml$subject_id, all=T)
-death_out_sharp_ml<-rdrobust(y=ml$death_out, x=ml$hgb, c=7, bwselect="msetwo", cluster=ml$subject_id, all=T)
-msofa_max_icu_out_sharp_ml<-rdrobust(y=ml$msofa_max_icu_out, x=ml$hgb, c=7, bwselect="msetwo", cluster=ml$subject_id, all=T)
-
-# explanatory
-respiration_out_fuzzy_ml<-rdrobust(y=ml$respiration_out, x=ml$hgb, fuzzy=ml$prbc_ex, c=7, bwselect="msetwo", cluster=ml$subject_id, all=T)
-coagulation_out_fuzzy_ml<-rdrobust(y=ml$coagulation_out, x=ml$hgb, fuzzy=ml$prbc_ex, c=7, bwselect="msetwo", cluster=ml$subject_id, all=T)
-liver_out_fuzzy_ml<-rdrobust(y=ml$liver_out, x=ml$hgb, fuzzy=ml$prbc_ex, c=7, bwselect="msetwo", cluster=ml$subject_id, all=T)
-cardiovascular_out_fuzzy_ml<-rdrobust(y=ml$cardiovascular_out, x=ml$hgb, fuzzy=ml$prbc_ex, c=7, bwselect="msetwo", cluster=ml$subject_id, all=T)
-cns_out_fuzzy_ml<-rdrobust(y=ml$cns_out, x=ml$hgb, fuzzy=ml$prbc_ex, c=7, bwselect="msetwo", cluster=ml$subject_id, all=T)
-renal_out_fuzzy_ml<-rdrobust(y=ml$renal_out, x=ml$hgb, fuzzy=ml$prbc_ex, c=7, bwselect="msetwo", cluster=ml$subject_id, all=T)
-msofa_death_out_fuzzy_ml<-rdrobust(y=ml$msofa_death_out, x=ml$hgb, fuzzy=ml$prbc_ex, c=7, bwselect="msetwo", cluster=ml$subject_id, all=T)
-msofa_nobili_out_fuzzy_ml<-rdrobust(y=ml$msofa_nobili_out, x=ml$hgb, fuzzy=ml$prbc_ex, c=7, bwselect="msetwo", cluster=ml$subject_id, all=T)
-
-#sensitivity
-msofa_out_one_hgb_fuzzy_ml<-rdrobust(y=mr$msofa_out, x=mr$hgb, fuzzy=mr$prbc_ex, c=7, bwselect="msetwo", cluster=mr$subject_id, all=T)
-msofa_out_adjusted_fuzzy_ml<-rdrobust(y=ml$msofa_out, x=ml$hgb, fuzzy=ml$prbc_ex, c=7, bwselect="msetwo", cluster=ml$subject_id, all=T, covs=c(ml$age+ml$female+ml$charlson+ml$sofa_co+ml$imv_co+ml$press_co))
-msofa_out_halfbw_fuzzy_ml<-rdrobust(y=ml$msofa_out, x=ml$hgb, fuzzy=ml$prbc_ex, c=7, h=c(msofa_out_fuzzy_ml$bws[1,1]/2,msofa_out_fuzzy_ml$bws[1,2]/2), cluster=ml$subject_id, all=T)
-msofa_out_doublebw_fuzzy_ml<-rdrobust(y=ml$msofa_out, x=ml$hgb, fuzzy=ml$prbc_ex, c=7, h=c(msofa_out_fuzzy_ml$bws[1,1]*2,msofa_out_fuzzy_ml$bws[1,2]*2), cluster=ml$subject_id, all=T)
-msofa_out_symmetricbw_fuzzy_ml<-rdrobust(y=ml$msofa_out, x=ml$hgb, fuzzy=ml$prbc_ex, c=7, bwselect="mserd", cluster=ml$subject_id, all=T)
-msofa_out_localquadratic_fuzzy_ml<-rdrobust(y=ml$msofa_out, x=ml$hgb, fuzzy=ml$prbc_ex, c=7, bwselect="msetwo", p=2, cluster=ml$subject_id, all=T)
-msofa_out_global3_fuzzy_ml<-rdrobust(y=ml$msofa_out, x=ml$hgb, fuzzy=ml$prbc_ex, c=7, p=3, h=c(7-min(ml$hgb), max(ml$hgb)-7), cluster=ml$subject_id, all=T)
-msofa_out_global4_fuzzy_ml<-rdrobust(y=ml$msofa_out, x=ml$hgb, fuzzy=ml$prbc_ex, c=7, p=4, h=c(7-min(ml$hgb), max(ml$hgb)-7), cluster=ml$subject_id, all=T)
-msofa_out_global5_fuzzy_ml<-rdrobust(y=ml$msofa_out, x=ml$hgb, fuzzy=ml$prbc_ex, c=7, p=5, h=c(7-min(ml$hgb), max(ml$hgb)-7), cluster=ml$subject_id, all=T)
-
-# subgroups
-msofa_out_sepsis_fuzzy_ml<-rdrobust(y=msep$msofa_out, x=msep$hgb, fuzzy=msep$prbc_ex, c=7, bwselect="msetwo", cluster=msep$subject_id, all=T)
-msofa_out_no_sepsis_fuzzy_ml<-rdrobust(y=mnsep$msofa_out, x=mnsep$hgb, fuzzy=mnsep$prbc_ex, c=7, bwselect="msetwo", cluster=mnsep$subject_id, all=T)
-
-msofa_out_cardiac_icu_fuzzy_ml<-rdrobust(y=mlc$msofa_out, x=mlc$hgb, fuzzy=mlc$prbc_ex, c=7, bwselect="msetwo", cluster=mlc$subject_id, all=T)
-msofa_out_no_cardiac_icu_fuzzy_ml<-rdrobust(y=mlnc$msofa_out, x=mlnc$hgb, fuzzy=mlnc$prbc_ex, c=7, bwselect="msetwo", cluster=mlnc$subject_id, all=T)
-```
-
-# models el
-```{r models el}
-#exposure
-prbc_ex_el<-rdrobust(y=el$prbc_ex, x=el$hgb, c=7, bwselect="msetwo", cluster=el$subject_id, all=T)
-
-#potential confounders
-age_el<-rdrobust(y=el$age, x=el$hgb, c=7, bwselect="msetwo", cluster=el$subject_id, all=T)
-female_el<-rdrobust(y=el$female, x=el$hgb, c=7, bwselect="msetwo", cluster=el$subject_id, all=T)
-charlson_el<-rdrobust(y=el$charlson, x=el$hgb, c=7, bwselect="msetwo", cluster=el$subject_id, all=T)
-sofa_co_el<-rdrobust(y=el$sofa_co, x=el$hgb, c=7, bwselect="msetwo", cluster=el$subject_id, all=T)
-imv_co_el<-rdrobust(y=el$imv_co, x=el$hgb, c=7, bwselect="msetwo", cluster=el$subject_id, all=T)
-press_co_el<-rdrobust(y=el$press_co, x=el$hgb, c=7, bwselect="msetwo", cluster=el$subject_id, all=T)
-
-#primary outcome
-msofa_out_fuzzy_el<-rdrobust(y=el$msofa_out, x=el$hgb, fuzzy=el$prbc_ex, c=7, bwselect="msetwo", cluster=el$subject_id, all=T)
-msofa_out_sharp_el<-rdrobust(y=el$msofa_out, x=el$hgb, c=7, bwselect="msetwo", cluster=el$subject_id, all=T)
-
-#secondary outcomes
-hgb_out_fuzzy_el<-rdrobust(y=el$hgb_out, x=el$hgb, fuzzy=el$prbc_ex, c=7, bwselect="msetwo", cluster=el$subject_id, all=T)
-imv_out_fuzzy_el<-rdrobust(y=el$imv_out, x=el$hgb, fuzzy=el$prbc_ex, c=7, bwselect="msetwo", cluster=el$subject_id, all=T)
-press_out_fuzzy_el<-rdrobust(y=el$press_out, x=el$hgb, fuzzy=el$prbc_ex, c=7, bwselect="msetwo", cluster=el$subject_id, all=T)
-lac_out_fuzzy_el<-rdrobust(y=el$lac_out, x=el$hgb, fuzzy=el$prbc_ex, c=7, bwselect="msetwo", cluster=el$subject_id, all=T)
-death_out_fuzzy_el<-rdrobust(y=el$death_out, x=el$hgb, fuzzy=el$prbc_ex, c=7, bwselect="msetwo", cluster=el$subject_id, all=T)
-msofa_max_icu_out_fuzzy_el<-rdrobust(y=el$msofa_max_icu_out, x=el$hgb, fuzzy=el$prbc_ex, c=7, bwselect="msetwo", cluster=el$subject_id, all=T)
-hgb_out_sharp_el<-rdrobust(y=el$hgb_out, x=el$hgb, c=7, bwselect="msetwo", cluster=el$subject_id, all=T)
-imv_out_sharp_el<-rdrobust(y=el$imv_out, x=el$hgb, c=7, bwselect="msetwo", cluster=el$subject_id, all=T)
-press_out_sharp_el<-rdrobust(y=el$press_out, x=el$hgb, c=7, bwselect="msetwo", cluster=el$subject_id, all=T)
-lac_out_sharp_el<-rdrobust(y=el$lac_out, x=el$hgb, c=7, bwselect="msetwo", cluster=el$subject_id, all=T)
-death_out_sharp_el<-rdrobust(y=el$death_out, x=el$hgb, c=7, bwselect="msetwo", cluster=el$subject_id, all=T)
-msofa_max_icu_out_sharp_el<-rdrobust(y=el$msofa_max_icu_out, x=el$hgb, c=7, bwselect="msetwo", cluster=el$subject_id, all=T)
-
-# explanatory
-respiration_out_fuzzy_el<-rdrobust(y=el$respiration_out, x=el$hgb, fuzzy=el$prbc_ex, c=7, bwselect="msetwo", cluster=el$subject_id, all=T)
-coagulation_out_fuzzy_el<-rdrobust(y=el$coagulation_out, x=el$hgb, fuzzy=el$prbc_ex, c=7, bwselect="msetwo", cluster=el$subject_id, all=T)
-liver_out_fuzzy_el<-rdrobust(y=el$liver_out, x=el$hgb, fuzzy=el$prbc_ex, c=7, bwselect="msetwo", cluster=el$subject_id, all=T)
-cardiovascular_out_fuzzy_el<-rdrobust(y=el$cardiovascular_out, x=el$hgb, fuzzy=el$prbc_ex, c=7, bwselect="msetwo", cluster=el$subject_id, all=T)
-cns_out_fuzzy_el<-rdrobust(y=el$cns_out, x=el$hgb, fuzzy=el$prbc_ex, c=7, bwselect="msetwo", cluster=el$subject_id, all=T)
-renal_out_fuzzy_el<-rdrobust(y=el$renal_out, x=el$hgb, fuzzy=el$prbc_ex, c=7, bwselect="msetwo", cluster=el$subject_id, all=T)
-msofa_death_out_fuzzy_el<-rdrobust(y=el$msofa_death_out, x=el$hgb, fuzzy=el$prbc_ex, c=7, bwselect="msetwo", cluster=el$subject_id, all=T)
-msofa_nobili_out_fuzzy_el<-rdrobust(y=el$msofa_nobili_out, x=el$hgb, fuzzy=el$prbc_ex, c=7, bwselect="msetwo", cluster=el$subject_id, all=T)
-
-#sensitivity
-msofa_out_one_hgb_fuzzy_el<-rdrobust(y=mr$msofa_out, x=mr$hgb, fuzzy=mr$prbc_ex, c=7, bwselect="msetwo", cluster=mr$subject_id, all=T)
-msofa_out_adjusted_fuzzy_el<-rdrobust(y=el$msofa_out, x=el$hgb, fuzzy=el$prbc_ex, c=7, bwselect="msetwo", cluster=el$subject_id, all=T, covs=c(el$age+el$female+el$charlson+el$sofa_co+el$imv_co+el$press_co))
-msofa_out_halfbw_fuzzy_el<-rdrobust(y=el$msofa_out, x=el$hgb, fuzzy=el$prbc_ex, c=7, h=c(msofa_out_fuzzy_el$bws[1,1]/2,msofa_out_fuzzy_el$bws[1,2]/2), cluster=el$subject_id, all=T)
-msofa_out_doublebw_fuzzy_el<-rdrobust(y=el$msofa_out, x=el$hgb, fuzzy=el$prbc_ex, c=7, h=c(msofa_out_fuzzy_el$bws[1,1]*2,msofa_out_fuzzy_el$bws[1,2]*2), cluster=el$subject_id, all=T)
-msofa_out_symmetricbw_fuzzy_el<-rdrobust(y=el$msofa_out, x=el$hgb, fuzzy=el$prbc_ex, c=7, bwselect="mserd", cluster=el$subject_id, all=T)
-msofa_out_localquadratic_fuzzy_el<-rdrobust(y=el$msofa_out, x=el$hgb, fuzzy=el$prbc_ex, c=7, bwselect="msetwo", p=2, cluster=el$subject_id, all=T)
-msofa_out_global3_fuzzy_el<-rdrobust(y=el$msofa_out, x=el$hgb, fuzzy=el$prbc_ex, c=7, p=3, h=c(7-min(el$hgb), max(el$hgb)-7), cluster=el$subject_id, all=T)
-msofa_out_global4_fuzzy_el<-rdrobust(y=el$msofa_out, x=el$hgb, fuzzy=el$prbc_ex, c=7, p=4, h=c(7-min(el$hgb), max(el$hgb)-7), cluster=el$subject_id, all=T)
-msofa_out_global5_fuzzy_el<-rdrobust(y=el$msofa_out, x=el$hgb, fuzzy=el$prbc_ex, c=7, p=5, h=c(7-min(el$hgb), max(el$hgb)-7), cluster=el$subject_id, all=T)
-
-# subgroups
-msofa_out_sepsis_fuzzy_el<-rdrobust(y=esep$msofa_out, x=esep$hgb, fuzzy=esep$prbc_ex, c=7, bwselect="msetwo", cluster=esep$subject_id, all=T)
-msofa_out_no_sepsis_fuzzy_el<-rdrobust(y=ensep$msofa_out, x=ensep$hgb, fuzzy=ensep$prbc_ex, c=7, bwselect="msetwo", cluster=ensep$subject_id, all=T)
-
-msofa_out_cardiac_icu_fuzzy_el<-rdrobust(y=elc$msofa_out, x=elc$hgb, fuzzy=elc$prbc_ex, c=7, bwselect="msetwo", cluster=elc$subject_id, all=T)
-msofa_out_no_cardiac_icu_fuzzy_el<-rdrobust(y=elnc$msofa_out, x=elnc$hgb, fuzzy=elnc$prbc_ex, c=7, bwselect="msetwo", cluster=elnc$subject_id, all=T)
-```
-
-
-# graphs for both cohorts
-```{r graphs}
-# histograms
-ml<-ml %>% mutate(color=factor(if_else(hgb<7,1,0)))
-plot_hist_ml<-ggplot(ml, aes(x=hgb, fill=color))+geom_histogram(binwidth=0.1)+
-  xlab("Hemoglobin - g/dL")+
-  ylab("Count")+
-  theme(legend.position = "none")+
-  coord_cartesian(xlim=c(5,10))+
-  ggtitle("MIMIC")+
-  annotate(geom="text",label="A", x=5, y=1300)
-
-
-el<-el %>% mutate(color=factor(if_else(hgb<7,1,0)))
-plot_hist_el<-ggplot(el, aes(x=hgb, fill=color))+geom_histogram(binwidth=0.1)+
-  xlab("Hemoglobin - g/dL")+
-  ylab("Count")+
-  theme(legend.position = "none")+
-  coord_cartesian(xlim=c(5,10))+
-  ggtitle("eICU")+
-  annotate(geom="text",label="B", x=5, y=3500)
-
-ggsave("plot_hist.jpeg", arrangeGrob(plot_hist_ml, plot_hist_el), width=10, height=10)
-
-
-#potential confounders
-plot_age_ml<-rdplot(y=ml$age, x=ml$hgb, c=7, shade=F, ci=F, p=1, h=c(age_ml$bws[1,1],age_ml$bws[1,2]), kernel="triangular")
-plot_age_ml<-plot_age_ml$rdplot+
-  xlab("Hemoglobin - g/dL")+
-  ylab("Age - years")+
-  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
-  geom_rect(aes(xmin=7-age_ml$bws[1,1], xmax=7+age_ml$bws[1,2], ymin=-Inf, ymax=+Inf), alpha=1/10)+
-  coord_cartesian(ylim=c(18,90), xlim=c(5,10))+
-  ggtitle("Age at the time of hemoglobin measurement")+
-  annotate(geom="text",label="A", x=5, y=90)
-
-plot_age_el<-rdplot(y=el$age, x=el$hgb, c=7, shade=F, ci=F, p=1, h=c(age_el$bws[1,1],age_el$bws[1,2]), kernel="triangular")
-plot_age_el<-plot_age_el$rdplot+
-  xlab("Hemoglobin - g/dL")+
-  ylab("Age - years")+
-  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
-  geom_rect(aes(xmin=7-age_el$bws[1,1], xmax=7+age_el$bws[1,2], ymin=-Inf, ymax=+Inf), alpha=1/10)+
-  coord_cartesian(ylim=c(18,90), xlim=c(5,10))+
-  ggtitle("")+
-  annotate(geom="text",label="B", x=5, y=90)
-
-plot_female_ml<-rdplot(y=ml$female, x=ml$hgb, c=7, shade=F, ci=F, p=1, h=c(female_ml$bws[1,1],female_ml$bws[1,2]), kernel="triangular")
-plot_female_ml<-plot_female_ml$rdplot+
-  xlab("Hemoglobin - g/dL")+
-  ylab("Female - proportion")+
-  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
-  geom_rect(aes(xmin=7-female_ml$bws[1,1], xmax=7+female_ml$bws[1,2], ymin=-Inf, ymax=+Inf), alpha=1/10)+
-  coord_cartesian(ylim=c(0,1), xlim=c(5,10))+
-  ggtitle("Female sex at the time of hemoglobin measurement")+
-  annotate(geom="text",label="C", x=5, y=1)
-
-plot_female_el<-rdplot(y=el$female, x=el$hgb, c=7, shade=F, ci=F, p=1, h=c(female_el$bws[1,1],female_el$bws[1,2]), kernel="triangular")
-plot_female_el<-plot_female_el$rdplot+
-  xlab("Hemoglobin - g/dL")+
-  ylab("Female - proportion")+
-  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
-  geom_rect(aes(xmin=7-female_el$bws[1,1], xmax=7+female_el$bws[1,2], ymin=-Inf, ymax=+Inf), alpha=1/10)+
-  coord_cartesian(ylim=c(0,1), xlim=c(5,10))+
-  ggtitle("")+
-  annotate(geom="text",label="D", x=5, y=1)
-
-plot_charlson_ml<-rdplot(y=ml$charlson, x=ml$hgb, c=7, shade=F, ci=F, p=1, h=c(charlson_ml$bws[1,1],charlson_ml$bws[1,2]), kernel="triangular")
-plot_charlson_ml<-plot_charlson_ml$rdplot+
-  xlab("Hemoglobin - g/dL")+
-  ylab("Charlson Comorbidity Score")+
-  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
-  geom_rect(aes(xmin=7-charlson_ml$bws[1,1], xmax=7+charlson_ml$bws[1,2], ymin=-Inf, ymax=+Inf), alpha=1/10)+
-  coord_cartesian(ylim=c(0,10), xlim=c(5,10))+
-  ggtitle("Charlson Comorbidity score at the time of hemoglobin measurement")+
-  annotate(geom="text",label="E", x=5, y=10)
-
-plot_charlson_el<-rdplot(y=el$charlson, x=el$hgb, c=7, shade=F, ci=F, p=1, h=c(charlson_el$bws[1,1],charlson_el$bws[1,2]), kernel="triangular")
-plot_charlson_el<-plot_charlson_el$rdplot+
-  xlab("Hemoglobin - g/dL")+
-  ylab("Charlson Comorbidity Score")+
-  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
-  geom_rect(aes(xmin=7-charlson_el$bws[1,1], xmax=7+charlson_el$bws[1,2], ymin=-Inf, ymax=+Inf), alpha=1/10)+
-  coord_cartesian(ylim=c(0,10), xlim=c(5,10))+
-  ggtitle("")+
-  annotate(geom="text",label="F", x=5, y=10)
-
-plot_sofa_co_ml<-rdplot(y=ml$sofa_co, x=ml$hgb, c=7, shade=F, ci=F, p=1, h=c(sofa_co_ml$bws[1,1],sofa_co_ml$bws[1,2]), kernel="triangular")
-plot_sofa_co_ml<-plot_sofa_co_ml$rdplot+
-  xlab("Hemoglobin - g/dL")+
-  ylab("SOFA Score")+
-  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
-  geom_rect(aes(xmin=7-sofa_co_ml$bws[1,1], xmax=7+sofa_co_ml$bws[1,2], ymin=-Inf, ymax=+Inf), alpha=1/10)+
-  coord_cartesian(ylim=c(0,25), xlim=c(5,10))+
-  ggtitle("SOFA score at the time of hemoglobin measurement")+
-  annotate(geom="text",label="G", x=5, y=25)
-
-plot_sofa_co_el<-rdplot(y=el$sofa_co, x=el$hgb, c=7, shade=F, ci=F, p=1, h=c(sofa_co_el$bws[1,1],sofa_co_el$bws[1,2]), kernel="triangular")
-plot_sofa_co_el<-plot_sofa_co_el$rdplot+
-  xlab("Hemoglobin - g/dL")+
-  ylab("SOFA Score")+
-  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
-  geom_rect(aes(xmin=7-sofa_co_el$bws[1,1], xmax=7+sofa_co_el$bws[1,2], ymin=-Inf, ymax=+Inf), alpha=1/10)+
-  coord_cartesian(ylim=c(0,25), xlim=c(5,10))+
-  ggtitle("")+
-  annotate(geom="text",label="H", x=5, y=25)
-
-plot_imv_co_ml<-rdplot(y=ml$imv_co, x=ml$hgb, c=7, shade=F, ci=F, p=1, h=c(imv_co_ml$bws[1,1],imv_co_ml$bws[1,2]), kernel="triangular")
-plot_imv_co_ml<-plot_imv_co_ml$rdplot+
-  xlab("Hemoglobin - g/dL")+
-  ylab("Invasive Mechanical Ventilation - proportion")+
-  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
-  geom_rect(aes(xmin=7-imv_co_ml$bws[1,1], xmax=7+imv_co_ml$bws[1,2], ymin=-Inf, ymax=+Inf), alpha=1/10)+
-  coord_cartesian(ylim=c(0,1), xlim=c(5,10))+
-  ggtitle("Use of invasive mechanical ventilation at the time of hemoglobin measurement")+
-  annotate(geom="text",label="I", x=5, y=1)
-
-plot_imv_co_el<-rdplot(y=el$imv_co, x=el$hgb, c=7, shade=F, ci=F, p=1, h=c(imv_co_el$bws[1,1],imv_co_el$bws[1,2]), kernel="triangular")
-plot_imv_co_el<-plot_imv_co_el$rdplot+
-  xlab("Hemoglobin - g/dL")+
-  ylab("Invasive Mechanical Ventilation - proportion")+
-  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
-  geom_rect(aes(xmin=7-imv_co_el$bws[1,1], xmax=7+imv_co_el$bws[1,2], ymin=-Inf, ymax=+Inf), alpha=1/10)+
-  coord_cartesian(ylim=c(0,1), xlim=c(5,10))+
-  ggtitle("")+
-  annotate(geom="text",label="J", x=5, y=1)
-
-plot_press_co_ml<-rdplot(y=ml$press_co, x=ml$hgb, c=7, shade=F, ci=F, p=1, h=c(press_co_ml$bws[1,1],press_co_ml$bws[1,2]), kernel="triangular")
-plot_press_co_ml<-plot_press_co_ml$rdplot+
-  xlab("Hemoglobin - g/dL")+
-  ylab("Vasopressors - proportion")+
-  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
-  geom_rect(aes(xmin=7-press_co_ml$bws[1,1], xmax=7+press_co_ml$bws[1,2], ymin=-Inf, ymax=+Inf), alpha=1/10)+
-  coord_cartesian(ylim=c(0,1), xlim=c(5,10))+
-  ggtitle("Use of vasopressors at the time of hemoglobin measurement")+
-  annotate(geom="text",label="K", x=5, y=1)
-
-plot_press_co_el<-rdplot(y=el$press_co, x=el$hgb, c=7, shade=F, ci=F, p=1, h=c(press_co_el$bws[1,1],press_co_el$bws[1,2]), kernel="triangular")
-plot_press_co_el<-plot_press_co_el$rdplot+
-  xlab("Hemoglobin - g/dL")+
-  ylab("Vasopressors - proportion")+
-  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
-  geom_rect(aes(xmin=7-press_co_el$bws[1,1], xmax=7+press_co_el$bws[1,2], ymin=-Inf, ymax=+Inf), alpha=1/10)+
-  coord_cartesian(ylim=c(0,1), xlim=c(5,10))+
-  ggtitle("")+
-  annotate(geom="text",label="L", x=5, y=1)
-
-ggsave("plot_confounders.jpeg", arrangeGrob(grobs=list(plot_age_ml, plot_age_el, plot_female_ml, plot_female_el, plot_charlson_ml, plot_charlson_el, plot_sofa_co_ml, plot_sofa_co_el, plot_imv_co_ml, plot_imv_co_el, plot_press_co_ml, plot_press_co_el), ncol=2, top=textGrob("MIMIC                                                                                            eICU", gp=gpar(fontsize=20))), width=15, height=20)
-
-#exposure
-plot_prbc_ex_ml<-rdplot(y=ml$prbc_ex, x=ml$hgb, c=7, shade=F, ci=F, p=1, h=c(prbc_ex_ml$bws[1,1],prbc_ex_ml$bws[1,2]), kernel="triangular")
-plot_prbc_ex_ml<-plot_prbc_ex_ml$rdplot+
-  xlab("Hemoglobin - g/dL")+
-  ylab("Blood transfusion - proportion")+
-  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
-  geom_rect(aes(xmin=7-prbc_ex_ml$bws[1,1], xmax=7+prbc_ex_ml$bws[1,2], ymin=-Inf, ymax=+Inf), alpha=1/10)+
-  coord_cartesian(ylim=c(0,1), xlim=c(5,10))+
-  ggtitle("Blood transfusion within 24 hours of hemoglobin measurement")+
-  annotate(geom="text",label="A", x=5, y=1)
-
-plot_prbc_ex_el<-rdplot(y=el$prbc_ex, x=el$hgb, c=7, shade=F, ci=F, p=1, h=c(prbc_ex_el$bws[1,1],prbc_ex_el$bws[1,2]), kernel="triangular")
-plot_prbc_ex_el<-plot_prbc_ex_el$rdplot+
-  xlab("Hemoglobin - g/dL")+
-  ylab("Blood transfusion - proportion")+
-  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
-  geom_rect(aes(xmin=7-prbc_ex_el$bws[1,1], xmax=7+prbc_ex_el$bws[1,2], ymin=-Inf, ymax=+Inf), alpha=1/10)+
-  coord_cartesian(ylim=c(0,1), xlim=c(5,10))+
-  ggtitle("")+
-  annotate(geom="text",label="B", x=5, y=1)
-
-#primary outcome
-plot_msofa_out_ml<-rdplot(y=ml$msofa_out, x=ml$hgb, c=7, shade=F, ci=F, p=1, h=c(msofa_out_sharp_ml$bws[1,1],msofa_out_sharp_ml$bws[1,2]), kernel="triangular")
-plot_msofa_out_ml<-plot_msofa_out_ml$rdplot+
-  xlab("Hemoglobin - g/dL")+
-  ylab("Modified SOFA Score outcome - proportion")+
-  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
-  geom_rect(aes(xmin=7-msofa_out_sharp_ml$bws[1,1], xmax=7+msofa_out_sharp_ml$bws[1,2], ymin=-Inf, ymax=+Inf), alpha=1/10)+
-  coord_cartesian(ylim=c(0,25), xlim=c(5,10))+
-  ggtitle("Modified SOFA score in the 24-72 hours after hemoglobin measurement")+
-  annotate(geom="text",label="C", x=5, y=25)
-
-plot_msofa_out_el<-rdplot(y=el$msofa_out, x=el$hgb, c=7, shade=F, ci=F, p=1, h=c(msofa_out_sharp_el$bws[1,1],msofa_out_sharp_el$bws[1,2]), kernel="triangular")
-plot_msofa_out_el<-plot_msofa_out_el$rdplot+
-  xlab("Hemoglobin - g/dL")+
-  ylab("Modified SOFA Score outcome - proportion")+
-  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
-  geom_rect(aes(xmin=7-msofa_out_sharp_el$bws[1,1], xmax=7+msofa_out_sharp_el$bws[1,2], ymin=-Inf, ymax=+Inf), alpha=1/10)+
-  coord_cartesian(ylim=c(0,25), xlim=c(5,10))+
-  ggtitle("")+
-  annotate(geom="text",label="D", x=5, y=25)
-
-ggsave("plot_exposure_outcome.jpeg", arrangeGrob(grobs=list(plot_prbc_ex_ml, plot_prbc_ex_el, plot_msofa_out_ml, plot_msofa_out_el), ncol=2, top=textGrob("MIMIC                                                                                                                  eICU", gp=gpar(fontsize=20))), width=20, height=15)
-
-```
-
-
-# Table creation
-```{r table_creation}
-table1_ml<-as.data.frame(rbind(
-  c("Age, years - median (IQR)", 
-    paste(round(median(ml$age),0), " (", round(quantile(ml$age, 0.25),0), "-", round(quantile(ml$age, 0.75),0), ")", sep=""),
-    paste(round(age_ml$coef[3],1), " (", round(age_ml$ci[3,1],1), ", ", round(age_ml$ci[3,2],1), ")", " years")
-    ),
-  c("Female sex, - No. (%)", 
-    paste(round(table(ml$female)[2],0), " (", round(prop.table(table(ml$female))[2]*100,1), ")", sep=""),
-    paste(round(female_ml$coef[3]*100,1), " (",round(female_ml$ci[3,1]*100,1), ", ", round(female_ml$ci[3,2]*100,1), ")", " %")
-    ),
-  c("SOFA score, points - median (IQR)", 
-    paste(round(median(ml$sofa_co, na.rm=T),0), " (", round(quantile(ml$sofa_co, 0.25, na.rm=T),0), "-", round(quantile(ml$sofa_co, 0.75, na.rm=T),0), ")", sep=""),
-    paste(round(sofa_co_ml$coef[3],1), " (", round(sofa_co_ml$ci[3,1],1), ", ", round(sofa_co_ml$ci[3,2],1), ")", " points")
-    ),
-  c("Charlson Comorbidity score, points - median (IQR)", 
-    paste(round(median(ml$charlson, na.rm=T),0), " (", round(quantile(ml$charlson, 0.25, na.rm=T),0), "-", round(quantile(ml$charlson, 0.75, na.rm=T),0), ")", sep=""),
-    paste(round(charlson_ml$coef[3],1), " (", round(charlson_ml$ci[3,1],1), ", ", round(charlson_ml$ci[3,2],1), ")", " points")
-    ),
-  c("Use of invasive mechanical ventilation, - No. (%)", 
-    paste(round(table(ml$imv_co)[2],0), " (", round(prop.table(table(ml$imv_co))[2]*100,1), ")", sep=""),
-    paste(round(imv_co_ml$coef[3]*100,1), " (",round(imv_co_ml$ci[3,1]*100,1), ", ", round(imv_co_ml$ci[3,2]*100,1), ")", " %")
-    ),
-  c("Use of vasopressors, - No. (%)", 
-    paste(round(table(ml$press_co)[2],0), " (", round(prop.table(table(ml$press_co))[2]*100,1), ")", sep=""),
-    paste(round(press_co_ml$coef[3]*100,1), " (",round(press_co_ml$ci[3,1]*100,1), ", ", round(press_co_ml$ci[3,2]*100,1), ")", " %")
-    )
-)) %>% rename(c(`Variable at the time of hemoglobin measurement`=V1,`Study Cohort`=V2, `Discontinuity at the hemoglobin threshold of 7.0 g/dL`=V3))
-
-table1_el<-as.data.frame(rbind(
-  c("Age, years - median (IQR)", 
-    paste(round(median(el$age),0), " (", round(quantile(el$age, 0.25),0), "-", round(quantile(el$age, 0.75),0), ")", sep=""),
-    paste(round(age_el$coef[3],1), " (", round(age_el$ci[3,1],1), ", ", round(age_el$ci[3,2],1), ")", " years")
-    ),
-  c("Female sex, - No. (%)", 
-    paste(round(table(el$female)[2],0), " (", round(prop.table(table(el$female))[2]*100,1), ")", sep=""),
-    paste(round(female_el$coef[3]*100,1), " (",round(female_el$ci[3,1]*100,1), ", ", round(female_el$ci[3,2]*100,1), ")", " %")
-    ),
-  c("SOFA score, points - median (IQR)", 
-    paste(round(median(el$sofa_co, na.rm=T),0), " (", round(quantile(el$sofa_co, 0.25, na.rm=T),0), "-", round(quantile(el$sofa_co, 0.75, na.rm=T),0), ")", sep=""),
-    paste(round(sofa_co_el$coef[3],1), " (", round(sofa_co_el$ci[3,1],1), ", ", round(sofa_co_el$ci[3,2],1), ")", " points")
-    ),
-  c("Charlson Comorbidity score, points - median (IQR)", 
-    paste(round(median(el$charlson, na.rm=T),0), " (", round(quantile(el$charlson, 0.25, na.rm=T),0), "-", round(quantile(el$charlson, 0.75, na.rm=T),0), ")", sep=""),
-    paste(round(charlson_el$coef[3],1), " (", round(charlson_el$ci[3,1],1), ", ", round(charlson_el$ci[3,2],1), ")", " points")
-    ),
-  c("Use of invasive mechanical ventilation, - No. (%)", 
-    paste(round(table(el$imv_co)[2],0), " (", round(prop.table(table(el$imv_co))[2]*100,1), ")", sep=""),
-    paste(round(imv_co_el$coef[3]*100,1), " (",round(imv_co_el$ci[3,1]*100,1), ", ", round(imv_co_el$ci[3,2]*100,1), ")", " %")
-    ),
-  c("Use of vasopressors, - No. (%)", 
-    paste(round(table(el$press_co)[2],0), " (", round(prop.table(table(el$press_co))[2]*100,1), ")", sep=""),
-    paste(round(press_co_el$coef[3]*100,1), " (",round(press_co_el$ci[3,1]*100,1), ", ", round(press_co_el$ci[3,2]*100,1), ")", " %")
-    )
-)) %>% rename(c(`Variable at the time of hemoglobin measurement`=V1,`Study Cohort`=V2, `Discontinuity at the hemoglobin threshold of 7.0 g/dL`=V3))
-
-table1<-cbind(table1_ml, table1_el)
-
-#exposure
-exposure_ml<-
-  c("Transfusion in the 24 hours after hemoglobin assessment (%)",
-    paste(round(prbc_ex_ml$coef[3]*100,1), " (", round(prbc_ex_ml$ci[3,1]*100,1), ", ", round(prbc_ex_ml$ci[3,2]*100,1), ")")
-    )
-exposure_el<-
-  c("Transfusion in the 24 hours after hemoglobin assessment (%)",
-    paste(round(prbc_ex_el$coef[3]*100,1), " (", round(prbc_ex_el$ci[3,1]*100,1), ", ", round(prbc_ex_el$ci[3,2]*100,1), ")")
-    )
-exposure<-rbind(exposure_ml, exposure_el)
-
-#outcomes
-outcomes_ml<-as.data.frame(rbind(
-  c("Primary outcome fuzzy", 
-    paste(round(msofa_out_fuzzy_ml$bws[1,1],1)),
-    paste(round(msofa_out_fuzzy_ml$bws[1,2],1)),
-    paste(round(msofa_out_fuzzy_ml$coef[3],1), " (", round(msofa_out_fuzzy_ml$ci[3,1],1), ", ", round(msofa_out_fuzzy_ml$ci[3,2],1), ")"),
-    paste(round(msofa_out_fuzzy_ml$pv[3],3))
-    ),
-  c("Primary outcome sharp", 
-    paste(round(msofa_out_sharp_ml$bws[1,1],1)),
-    paste(round(msofa_out_sharp_ml$bws[1,2],1)),
-    paste(round(msofa_out_sharp_ml$coef[3],1), " (", round(msofa_out_sharp_ml$ci[3,1],1), ", ", round(msofa_out_sharp_ml$ci[3,2],1), ")"),
-    paste(round(msofa_out_sharp_ml$pv[3],3))
-    ),
-  c("First hemoglobin level in the 24-72 hours after hemoglobin measurement fuzzy", 
-    paste(round(hgb_out_fuzzy_ml$bws[1,1],1)),
-    paste(round(hgb_out_fuzzy_ml$bws[1,2],1)),
-    paste(round(hgb_out_fuzzy_ml$coef[3],1), " (", round(hgb_out_fuzzy_ml$ci[3,1],1), ", ", round(hgb_out_fuzzy_ml$ci[3,2],1), ")"),
-    paste(round(hgb_out_fuzzy_ml$pv[3],3))
-    ),
-  c("First hemoglobin level in the 24-72 hours after hemoglobin measurement sharp", 
-    paste(round(hgb_out_sharp_ml$bws[1,1],1)),
-    paste(round(hgb_out_sharp_ml$bws[1,2],1)),
-    paste(round(hgb_out_sharp_ml$coef[3],1), " (", round(hgb_out_sharp_ml$ci[3,1],1), ", ", round(hgb_out_sharp_ml$ci[3,2],1), ")"),
-    paste(round(hgb_out_sharp_ml$pv[3],3))
-    ),
-  c("Use of invasive mechanical ventilation in the 24-72 hours after hemoglobin measurement fuzzy", 
-    paste(round(imv_out_fuzzy_ml$bws[1,1],1)),
-    paste(round(imv_out_fuzzy_ml$bws[1,2],1)),
-    paste(round(imv_out_fuzzy_ml$coef[3]*100,1), " (", round(imv_out_fuzzy_ml$ci[3,1]*100,1), ", ", round(imv_out_fuzzy_ml$ci[3,2]*100,1), ")"),
-    paste(round(imv_out_fuzzy_ml$pv[3],3))
-    ),
-  c("Use of invasive mechanical ventilation in the 24-72 hours after hemoglobin measurement sharp", 
-    paste(round(imv_out_sharp_ml$bws[1,1],1)),
-    paste(round(imv_out_sharp_ml$bws[1,2],1)),
-    paste(round(imv_out_sharp_ml$coef[3]*100,1), " (", round(imv_out_sharp_ml$ci[3,1]*100,1), ", ", round(imv_out_sharp_ml$ci[3,2]*100,1), ")"),
-    paste(round(imv_out_sharp_ml$pv[3],3))
-    ),
-  c("Use of vasopressors in the 24-72 hours after hemoglobin measurement fuzzy", 
-    paste(round(press_out_fuzzy_ml$bws[1,1],1)),
-    paste(round(press_out_fuzzy_ml$bws[1,2],1)),
-    paste(round(press_out_fuzzy_ml$coef[3]*100,1), " (", round(press_out_fuzzy_ml$ci[3,1]*100,1), ", ", round(press_out_fuzzy_ml$ci[3,2]*100,1), ")"),
-    paste(round(press_out_fuzzy_ml$pv[3],3))
-    ),
-  c("Use of vasopressors in the 24-72 hours after hemoglobin measurement sharp", 
-    paste(round(press_out_sharp_ml$bws[1,1],1)),
-    paste(round(press_out_sharp_ml$bws[1,2],1)),
-    paste(round(press_out_sharp_ml$coef[3]*100,1), " (", round(press_out_sharp_ml$ci[3,1]*100,1), ", ", round(press_out_sharp_ml$ci[3,2]*100,1), ")"),
-    paste(round(press_out_sharp_ml$pv[3],3))
-    ),
-  c("Maximum lactate level in the 24-72 hours after hemoglobin measurement fuzzy", 
-    paste(round(lac_out_fuzzy_ml$bws[1,1],1)),
-    paste(round(lac_out_fuzzy_ml$bws[1,2],1)),
-    paste(round(lac_out_fuzzy_ml$coef[3],1), " (", round(lac_out_fuzzy_ml$ci[3,1],1), ", ", round(lac_out_fuzzy_ml$ci[3,2],1), ")"),
-    paste(round(lac_out_fuzzy_ml$pv[3],3))
-    ),
-  c("Maximum lactate level in the 24-72 hours after hemoglobin measurement sharp", 
-    paste(round(lac_out_sharp_ml$bws[1,1],1)),
-    paste(round(lac_out_sharp_ml$bws[1,2],1)),
-    paste(round(lac_out_sharp_ml$coef[3],1), " (", round(lac_out_sharp_ml$ci[3,1],1), ", ", round(lac_out_sharp_ml$ci[3,2],1), ")"),
-    paste(round(lac_out_sharp_ml$pv[3],3))
-    ),
-  c("Hospital mortality fuzzy", 
-    paste(round(death_out_fuzzy_ml$bws[1,1],1)),
-    paste(round(death_out_fuzzy_ml$bws[1,2],1)),
-    paste(round(death_out_fuzzy_ml$coef[3]*100,1), " (", round(death_out_fuzzy_ml$ci[3,1]*100,1), ", ", round(death_out_fuzzy_ml$ci[3,2]*100,1), ")"),
-    paste(round(death_out_fuzzy_ml$pv[3],3))
-    ),
-  c("Hospital mortality sharp", 
-    paste(round(death_out_sharp_ml$bws[1,1],1)),
-    paste(round(death_out_sharp_ml$bws[1,2],1)),
-    paste(round(death_out_sharp_ml$coef[3]*100,1), " (", round(death_out_sharp_ml$ci[3,1]*100,1), ", ", round(death_out_sharp_ml$ci[3,2]*100,1), ")"),
-    paste(round(death_out_sharp_ml$pv[3],3))
-    ),
-  c("Maximum modified SOFA score after hemoglobin measurement to ICU discharge fuzzy", 
-    paste(round(msofa_max_icu_out_fuzzy_ml$bws[1,1],1)),
-    paste(round(msofa_max_icu_out_fuzzy_ml$bws[1,2],1)),
-    paste(round(msofa_max_icu_out_fuzzy_ml$coef[3],1), " (", round(msofa_max_icu_out_fuzzy_ml$ci[3,1],1), ", ", round(msofa_max_icu_out_fuzzy_ml$ci[3,2],1), ")"),
-    paste(round(msofa_max_icu_out_fuzzy_ml$pv[3],3))
-    ),
-  c("Maximum modified SOFA score after hemoglobin measurement to ICU discharge sharp", 
-    paste(round(msofa_max_icu_out_sharp_ml$bws[1,1],1)),
-    paste(round(msofa_max_icu_out_sharp_ml$bws[1,2],1)),
-    paste(round(msofa_max_icu_out_sharp_ml$coef[3],1), " (", round(msofa_max_icu_out_sharp_ml$ci[3,1],1), ", ", round(msofa_max_icu_out_sharp_ml$ci[3,2],1), ")"),
-    paste(round(msofa_max_icu_out_sharp_ml$pv[3],3))
-    )
-)) %>% rename(c(`Analysis`=V1,`Bandwidth below the threshold`=V2, `Bandwidth above the threshold`=V3, `Local average treatment effect - SOFA points (Robust 95% CI)`=V4, `p-value`=V5))
-
-outcomes_el<-as.data.frame(rbind(
-  c("Primary outcome fuzzy", 
-    paste(round(msofa_out_fuzzy_el$bws[1,1],1)),
-    paste(round(msofa_out_fuzzy_el$bws[1,2],1)),
-    paste(round(msofa_out_fuzzy_el$coef[3],1), " (", round(msofa_out_fuzzy_el$ci[3,1],1), ", ", round(msofa_out_fuzzy_el$ci[3,2],1), ")"),
-    paste(round(msofa_out_fuzzy_el$pv[3],3))
-    ),
-  c("Primary outcome sharp", 
-    paste(round(msofa_out_sharp_el$bws[1,1],1)),
-    paste(round(msofa_out_sharp_el$bws[1,2],1)),
-    paste(round(msofa_out_sharp_el$coef[3],1), " (", round(msofa_out_sharp_el$ci[3,1],1), ", ", round(msofa_out_sharp_el$ci[3,2],1), ")"),
-    paste(round(msofa_out_sharp_el$pv[3],3))
-    ),
-  c("First hemoglobin level in the 24-72 hours after hemoglobin measurement fuzzy", 
-    paste(round(hgb_out_fuzzy_el$bws[1,1],1)),
-    paste(round(hgb_out_fuzzy_el$bws[1,2],1)),
-    paste(round(hgb_out_fuzzy_el$coef[3],1), " (", round(hgb_out_fuzzy_el$ci[3,1],1), ", ", round(hgb_out_fuzzy_el$ci[3,2],1), ")"),
-    paste(round(hgb_out_fuzzy_el$pv[3],3))
-    ),
-  c("First hemoglobin level in the 24-72 hours after hemoglobin measurement sharp", 
-    paste(round(hgb_out_sharp_el$bws[1,1],1)),
-    paste(round(hgb_out_sharp_el$bws[1,2],1)),
-    paste(round(hgb_out_sharp_el$coef[3],1), " (", round(hgb_out_sharp_el$ci[3,1],1), ", ", round(hgb_out_sharp_el$ci[3,2],1), ")"),
-    paste(round(hgb_out_sharp_el$pv[3],3))
-    ),
-  c("Use of invasive mechanical ventilation in the 24-72 hours after hemoglobin measurement fuzzy", 
-    paste(round(imv_out_fuzzy_el$bws[1,1],1)),
-    paste(round(imv_out_fuzzy_el$bws[1,2],1)),
-    paste(round(imv_out_fuzzy_el$coef[3]*100,1), " (", round(imv_out_fuzzy_el$ci[3,1]*100,1), ", ", round(imv_out_fuzzy_el$ci[3,2]*100,1), ")"),
-    paste(round(imv_out_fuzzy_el$pv[3],3))
-    ),
-  c("Use of invasive mechanical ventilation in the 24-72 hours after hemoglobin measurement sharp", 
-    paste(round(imv_out_sharp_el$bws[1,1],1)),
-    paste(round(imv_out_sharp_el$bws[1,2],1)),
-    paste(round(imv_out_sharp_el$coef[3]*100,1), " (", round(imv_out_sharp_el$ci[3,1]*100,1), ", ", round(imv_out_sharp_el$ci[3,2]*100,1), ")"),
-    paste(round(imv_out_sharp_el$pv[3],3))
-    ),
-  c("Use of vasopressors in the 24-72 hours after hemoglobin measurement fuzzy", 
-    paste(round(press_out_fuzzy_el$bws[1,1],1)),
-    paste(round(press_out_fuzzy_el$bws[1,2],1)),
-    paste(round(press_out_fuzzy_el$coef[3]*100,1), " (", round(press_out_fuzzy_el$ci[3,1]*100,1), ", ", round(press_out_fuzzy_el$ci[3,2]*100,1), ")"),
-    paste(round(press_out_fuzzy_el$pv[3],3))
-    ),
-  c("Use of vasopressors in the 24-72 hours after hemoglobin measurement sharp", 
-    paste(round(press_out_sharp_el$bws[1,1],1)),
-    paste(round(press_out_sharp_el$bws[1,2],1)),
-    paste(round(press_out_sharp_el$coef[3]*100,1), " (", round(press_out_sharp_el$ci[3,1]*100,1), ", ", round(press_out_sharp_el$ci[3,2]*100,1), ")"),
-    paste(round(press_out_sharp_el$pv[3],3))
-    ),
-  c("Maximum lactate level in the 24-72 hours after hemoglobin measurement fuzzy", 
-    paste(round(lac_out_fuzzy_el$bws[1,1],1)),
-    paste(round(lac_out_fuzzy_el$bws[1,2],1)),
-    paste(round(lac_out_fuzzy_el$coef[3],1), " (", round(lac_out_fuzzy_el$ci[3,1],1), ", ", round(lac_out_fuzzy_el$ci[3,2],1), ")"),
-    paste(round(lac_out_fuzzy_el$pv[3],3))
-    ),
-  c("Maximum lactate level in the 24-72 hours after hemoglobin measurement sharp", 
-    paste(round(lac_out_sharp_el$bws[1,1],1)),
-    paste(round(lac_out_sharp_el$bws[1,2],1)),
-    paste(round(lac_out_sharp_el$coef[3],1), " (", round(lac_out_sharp_el$ci[3,1],1), ", ", round(lac_out_sharp_el$ci[3,2],1), ")"),
-    paste(round(lac_out_sharp_el$pv[3],3))
-    ),
-  c("Hospital mortality fuzzy", 
-    paste(round(death_out_fuzzy_el$bws[1,1],1)),
-    paste(round(death_out_fuzzy_el$bws[1,2],1)),
-    paste(round(death_out_fuzzy_el$coef[3]*100,1), " (", round(death_out_fuzzy_el$ci[3,1]*100,1), ", ", round(death_out_fuzzy_el$ci[3,2]*100,1), ")"),
-    paste(round(death_out_fuzzy_el$pv[3],3))
-    ),
-  c("Hospital mortality sharp", 
-    paste(round(death_out_sharp_el$bws[1,1],1)),
-    paste(round(death_out_sharp_el$bws[1,2],1)),
-    paste(round(death_out_sharp_el$coef[3]*100,1), " (", round(death_out_sharp_el$ci[3,1]*100,1), ", ", round(death_out_sharp_el$ci[3,2]*100,1), ")"),
-    paste(round(death_out_sharp_el$pv[3],3))
-    ),
-  c("Maximum modified SOFA score after hemoglobin measurement to ICU discharge fuzzy", 
-    paste(round(msofa_max_icu_out_fuzzy_el$bws[1,1],1)),
-    paste(round(msofa_max_icu_out_fuzzy_el$bws[1,2],1)),
-    paste(round(msofa_max_icu_out_fuzzy_el$coef[3],1), " (", round(msofa_max_icu_out_fuzzy_el$ci[3,1],1), ", ", round(msofa_max_icu_out_fuzzy_el$ci[3,2],1), ")"),
-    paste(round(msofa_max_icu_out_fuzzy_el$pv[3],3))
-    ),
-  c("Maximum modified SOFA score after hemoglobin measurement to ICU discharge sharp", 
-    paste(round(msofa_max_icu_out_sharp_el$bws[1,1],1)),
-    paste(round(msofa_max_icu_out_sharp_el$bws[1,2],1)),
-    paste(round(msofa_max_icu_out_sharp_el$coef[3],1), " (", round(msofa_max_icu_out_sharp_el$ci[3,1],1), ", ", round(msofa_max_icu_out_sharp_el$ci[3,2],1), ")"),
-    paste(round(msofa_max_icu_out_sharp_el$pv[3],3))
-    )
-)) %>% rename(c(`Analysis`=V1,`Bandwidth below the threshold`=V2, `Bandwidth above the threshold`=V3, `Local average treatment effect - SOFA points (Robust 95% CI)`=V4, `p-value`=V5))
-
-outcomes<-cbind(outcomes_ml,outcomes_el)
-
-
-#sensitivity
-sensitivty_ml<-as.data.frame(rbind(
-  
-  c("Half bandwidth sensitivity analysis", 
-    paste(round(msofa_out_halfbw_fuzzy_ml$bws[1,1],1)),
-    paste(round(msofa_out_halfbw_fuzzy_ml$bws[1,2],1)),
-    paste(round(msofa_out_halfbw_fuzzy_ml$coef[3],1), " (", round(msofa_out_halfbw_fuzzy_ml$ci[3,1],1), ", ", round(msofa_out_halfbw_fuzzy_ml$ci[3,2],1), ")"),
-    paste(round(msofa_out_halfbw_fuzzy_ml$pv[3],3))
-    ),
-  c("Double bandwidth sensitivity analysis", 
-    paste(round(msofa_out_doublebw_fuzzy_ml$bws[1,1],1)),
-    paste(round(msofa_out_doublebw_fuzzy_ml$bws[1,2],1)),
-    paste(round(msofa_out_doublebw_fuzzy_ml$coef[3],1), " (", round(msofa_out_doublebw_fuzzy_ml$ci[3,1],1), ", ", round(msofa_out_doublebw_fuzzy_ml$ci[3,2],1), ")"),
-    paste(round(msofa_out_doublebw_fuzzy_ml$pv[3],3))
-    ),
-  c("Symmetric bandwidth sensitivity analysis", 
-    paste(round(msofa_out_symmetricbw_fuzzy_ml$bws[1,1],1)),
-    paste(round(msofa_out_symmetricbw_fuzzy_ml$bws[1,2],1)),
-    paste(round(msofa_out_symmetricbw_fuzzy_ml$coef[3],1), " (", round(msofa_out_symmetricbw_fuzzy_ml$ci[3,1],1), ", ", round(msofa_out_symmetricbw_fuzzy_ml$ci[3,2],1), ")"),
-    paste(round(msofa_out_symmetricbw_fuzzy_ml$pv[3],3))
-    ),
-  c("Local quadratic regression sensitivity analysis", 
-    paste(round(msofa_out_localquadratic_fuzzy_ml$bws[1,1],1)),
-    paste(round(msofa_out_localquadratic_fuzzy_ml$bws[1,2],1)),
-    paste(round(msofa_out_localquadratic_fuzzy_ml$coef[3],1), " (", round(msofa_out_localquadratic_fuzzy_ml$ci[3,1],1), ", ", round(msofa_out_localquadratic_fuzzy_ml$ci[3,2],1), ")"),
-    paste(round(msofa_out_localquadratic_fuzzy_ml$pv[3],3))
-    ),
-  c("Global polynomial (3rd order) sensitivity analysis", 
-    paste(round(msofa_out_global3_fuzzy_ml$bws[1,1],1)),
-    paste(round(msofa_out_global3_fuzzy_ml$bws[1,2],1)),
-    paste(round(msofa_out_global3_fuzzy_ml$coef[3],1), " (", round(msofa_out_global3_fuzzy_ml$ci[3,1],1), ", ", round(msofa_out_global3_fuzzy_ml$ci[3,2],1), ")"),
-    paste(round(msofa_out_global3_fuzzy_ml$pv[3],3))
-    ),
-    c("Global polynomial (4th order) sensitivity analysis", 
-    paste(round(msofa_out_global4_fuzzy_ml$bws[1,1],1)),
-    paste(round(msofa_out_global4_fuzzy_ml$bws[1,2],1)),
-    paste(round(msofa_out_global4_fuzzy_ml$coef[3],1), " (", round(msofa_out_global4_fuzzy_ml$ci[3,1],1), ", ", round(msofa_out_global4_fuzzy_ml$ci[3,2],1), ")"),
-    paste(round(msofa_out_global4_fuzzy_ml$pv[3],3))
-    ),
-    c("Global polynomial (5th order) sensitivity analysis", 
-    paste(round(msofa_out_global5_fuzzy_ml$bws[1,1],1)),
-    paste(round(msofa_out_global5_fuzzy_ml$bws[1,2],1)),
-    paste(round(msofa_out_global5_fuzzy_ml$coef[3],1), " (", round(msofa_out_global5_fuzzy_ml$ci[3,1],1), ", ", round(msofa_out_global5_fuzzy_ml$ci[3,2],1), ")"),
-    paste(round(msofa_out_global5_fuzzy_ml$pv[3],3))
-    ),
-  c("Randomly selected hemoglobin per patient sensitivity analysis", 
-    paste(round(msofa_out_one_hgb_fuzzy_ml$bws[1,1],1)),
-    paste(round(msofa_out_one_hgb_fuzzy_ml$bws[1,2],1)),
-    paste(round(msofa_out_one_hgb_fuzzy_ml$coef[3],1), " (", round(msofa_out_one_hgb_fuzzy_ml$ci[3,1],1), ", ", round(msofa_out_one_hgb_fuzzy_ml$ci[3,2],1), ")"),
-    paste(round(msofa_out_one_hgb_fuzzy_ml$pv[3],3))
-    ),
-  c("Adjusted for potential confounders sensitivity analysis", 
-    paste(round(msofa_out_adjusted_fuzzy_ml$bws[1,1],1)),
-    paste(round(msofa_out_adjusted_fuzzy_ml$bws[1,2],1)),
-    paste(round(msofa_out_adjusted_fuzzy_ml$coef[3],1), " (", round(msofa_out_adjusted_fuzzy_ml$ci[3,1],1), ", ", round(msofa_out_adjusted_fuzzy_ml$ci[3,2],1), ")"),
-    paste(round(msofa_out_adjusted_fuzzy_ml$pv[3],3))
-    )
-)) %>% rename(c(`Analysis`=V1,`Bandwidth below the threshold`=V2, `Bandwidth above the threshold`=V3, `Local average treatment effect - SOFA points (Robust 95% CI)`=V4, `p-value`=V5))
-
-sensitivty_el<-as.data.frame(rbind(
-  
-  c("Half bandwidth sensitivity analysis", 
-    paste(round(msofa_out_halfbw_fuzzy_el$bws[1,1],1)),
-    paste(round(msofa_out_halfbw_fuzzy_el$bws[1,2],1)),
-    paste(round(msofa_out_halfbw_fuzzy_el$coef[3],1), " (", round(msofa_out_halfbw_fuzzy_el$ci[3,1],1), ", ", round(msofa_out_halfbw_fuzzy_el$ci[3,2],1), ")"),
-    paste(round(msofa_out_halfbw_fuzzy_el$pv[3],3))
-    ),
-  c("Double bandwidth sensitivity analysis", 
-    paste(round(msofa_out_doublebw_fuzzy_el$bws[1,1],1)),
-    paste(round(msofa_out_doublebw_fuzzy_el$bws[1,2],1)),
-    paste(round(msofa_out_doublebw_fuzzy_el$coef[3],1), " (", round(msofa_out_doublebw_fuzzy_el$ci[3,1],1), ", ", round(msofa_out_doublebw_fuzzy_el$ci[3,2],1), ")"),
-    paste(round(msofa_out_doublebw_fuzzy_el$pv[3],3))
-    ),
-  c("Symmetric bandwidth sensitivity analysis", 
-    paste(round(msofa_out_symmetricbw_fuzzy_el$bws[1,1],1)),
-    paste(round(msofa_out_symmetricbw_fuzzy_el$bws[1,2],1)),
-    paste(round(msofa_out_symmetricbw_fuzzy_el$coef[3],1), " (", round(msofa_out_symmetricbw_fuzzy_el$ci[3,1],1), ", ", round(msofa_out_symmetricbw_fuzzy_el$ci[3,2],1), ")"),
-    paste(round(msofa_out_symmetricbw_fuzzy_el$pv[3],3))
-    ),
-  c("Local quadratic regression sensitivity analysis", 
-    paste(round(msofa_out_localquadratic_fuzzy_el$bws[1,1],1)),
-    paste(round(msofa_out_localquadratic_fuzzy_el$bws[1,2],1)),
-    paste(round(msofa_out_localquadratic_fuzzy_el$coef[3],1), " (", round(msofa_out_localquadratic_fuzzy_el$ci[3,1],1), ", ", round(msofa_out_localquadratic_fuzzy_el$ci[3,2],1), ")"),
-    paste(round(msofa_out_localquadratic_fuzzy_el$pv[3],3))
-    ),
-  c("Global polynomial (3rd order) sensitivity analysis", 
-    paste(round(msofa_out_global3_fuzzy_el$bws[1,1],1)),
-    paste(round(msofa_out_global3_fuzzy_el$bws[1,2],1)),
-    paste(round(msofa_out_global3_fuzzy_el$coef[3],1), " (", round(msofa_out_global3_fuzzy_el$ci[3,1],1), ", ", round(msofa_out_global3_fuzzy_el$ci[3,2],1), ")"),
-    paste(round(msofa_out_global3_fuzzy_el$pv[3],3))
-    ),
-    c("Global polynomial (4th order) sensitivity analysis", 
-    paste(round(msofa_out_global4_fuzzy_el$bws[1,1],1)),
-    paste(round(msofa_out_global4_fuzzy_el$bws[1,2],1)),
-    paste(round(msofa_out_global4_fuzzy_el$coef[3],1), " (", round(msofa_out_global4_fuzzy_el$ci[3,1],1), ", ", round(msofa_out_global4_fuzzy_el$ci[3,2],1), ")"),
-    paste(round(msofa_out_global4_fuzzy_el$pv[3],3))
-    ),
-    c("Global polynomial (5th order) sensitivity analysis", 
-    paste(round(msofa_out_global5_fuzzy_el$bws[1,1],1)),
-    paste(round(msofa_out_global5_fuzzy_el$bws[1,2],1)),
-    paste(round(msofa_out_global5_fuzzy_el$coef[3],1), " (", round(msofa_out_global5_fuzzy_el$ci[3,1],1), ", ", round(msofa_out_global5_fuzzy_el$ci[3,2],1), ")"),
-    paste(round(msofa_out_global5_fuzzy_el$pv[3],3))
-    ),
-  c("Randoely selected hemoglobin per patient sensitivity analysis", 
-    paste(round(msofa_out_one_hgb_fuzzy_el$bws[1,1],1)),
-    paste(round(msofa_out_one_hgb_fuzzy_el$bws[1,2],1)),
-    paste(round(msofa_out_one_hgb_fuzzy_el$coef[3],1), " (", round(msofa_out_one_hgb_fuzzy_el$ci[3,1],1), ", ", round(msofa_out_one_hgb_fuzzy_el$ci[3,2],1), ")"),
-    paste(round(msofa_out_one_hgb_fuzzy_el$pv[3],3))
-    ),
-  c("Adjusted for potential confounders sensitivity analysis", 
-    paste(round(msofa_out_adjusted_fuzzy_el$bws[1,1],1)),
-    paste(round(msofa_out_adjusted_fuzzy_el$bws[1,2],1)),
-    paste(round(msofa_out_adjusted_fuzzy_el$coef[3],1), " (", round(msofa_out_adjusted_fuzzy_el$ci[3,1],1), ", ", round(msofa_out_adjusted_fuzzy_el$ci[3,2],1), ")"),
-    paste(round(msofa_out_adjusted_fuzzy_el$pv[3],3))
-    )
-)) %>% rename(c(`Analysis`=V1,`Bandwidth below the threshold`=V2, `Bandwidth above the threshold`=V3, `Local average treatment effect - SOFA points (Robust 95% CI)`=V4, `p-value`=V5))
-
-sensitivty<-cbind(sensitivty_ml,sensitivty_el)
-
-
-# explanatory
-explanatory_ml<-as.data.frame(rbind(
-  c("Respiratory SOFA component score in the 24-72 hours after hemoglobin measurement", 
-    paste(round(respiration_out_fuzzy_ml$bws[1,1],1)),
-    paste(round(respiration_out_fuzzy_ml$bws[1,2],1)),
-    paste(round(respiration_out_fuzzy_ml$coef[3],1), " (", round(respiration_out_fuzzy_ml$ci[3,1],1), ", ", round(respiration_out_fuzzy_ml$ci[3,2],1), ")"),
-    paste(round(respiration_out_fuzzy_ml$pv[3],3))
-    ),
-  c("Coagulation SOFA component score in the 24-72 hours after hemoglobin measurement", 
-    paste(round(coagulation_out_fuzzy_ml$bws[1,1],1)),
-    paste(round(coagulation_out_fuzzy_ml$bws[1,2],1)),
-    paste(round(coagulation_out_fuzzy_ml$coef[3],1), " (", round(coagulation_out_fuzzy_ml$ci[3,1],1), ", ", round(coagulation_out_fuzzy_ml$ci[3,2],1), ")"),
-    paste(round(coagulation_out_fuzzy_ml$pv[3],3))
-    ),
-  c("Liver SOFA component score in the 24-72 hours after hemoglobin measurement", 
-    paste(round(liver_out_fuzzy_ml$bws[1,1],1)),
-    paste(round(liver_out_fuzzy_ml$bws[1,2],1)),
-    paste(round(liver_out_fuzzy_ml$coef[3],1), " (", round(liver_out_fuzzy_ml$ci[3,1],1), ", ", round(liver_out_fuzzy_ml$ci[3,2],1), ")"),
-    paste(round(liver_out_fuzzy_ml$pv[3],3))
-    ),
-  c("Cardiovascular SOFA component score in the 24-72 hours after hemoglobin measurement", 
-    paste(round(cardiovascular_out_fuzzy_ml$bws[1,1],1)),
-    paste(round(cardiovascular_out_fuzzy_ml$bws[1,2],1)),
-    paste(round(cardiovascular_out_fuzzy_ml$coef[3],1), " (", round(cardiovascular_out_fuzzy_ml$ci[3,1],1), ", ", round(cardiovascular_out_fuzzy_ml$ci[3,2],1), ")"),
-    paste(round(cardiovascular_out_fuzzy_ml$pv[3],3))
-    ),
-  c("Central nervous system SOFA component score in the 24-72 hours after hemoglobin measurement", 
-    paste(round(cns_out_fuzzy_ml$bws[1,1],1)),
-    paste(round(cns_out_fuzzy_ml$bws[1,2],1)),
-    paste(round(cns_out_fuzzy_ml$coef[3],1), " (", round(cns_out_fuzzy_ml$ci[3,1],1), ", ", round(cns_out_fuzzy_ml$ci[3,2],1), ")"),
-    paste(round(cns_out_fuzzy_ml$pv[3],3))
-    ),
-  c("Renal SOFA component score in the 24-72 hours after hemoglobin measurement", 
-    paste(round(renal_out_fuzzy_ml$bws[1,1],1)),
-    paste(round(renal_out_fuzzy_ml$bws[1,2],1)),
-    paste(round(renal_out_fuzzy_ml$coef[3],1), " (", round(renal_out_fuzzy_ml$ci[3,1],1), ", ", round(renal_out_fuzzy_ml$ci[3,2],1), ")"),
-    paste(round(renal_out_fuzzy_ml$pv[3],3))
-    ),
-  c("Death SOFA component score in the 24-72 hours after hemoglobin measurement", 
-    paste(round(msofa_death_out_fuzzy_ml$bws[1,1],1)),
-    paste(round(msofa_death_out_fuzzy_ml$bws[1,2],1)),
-    paste(round(msofa_death_out_fuzzy_ml$coef[3],1), " (", round(msofa_death_out_fuzzy_ml$ci[3,1],1), ", ", round(msofa_death_out_fuzzy_ml$ci[3,2],1), ")"),
-    paste(round(msofa_death_out_fuzzy_ml$pv[3],3))
-    ),
-  c("Modified SOFA score primary outcome without liver component score in the 24-72 hours after hemoglobin measurement", 
-    paste(round(msofa_nobili_out_fuzzy_ml$bws[1,1],1)),
-    paste(round(msofa_nobili_out_fuzzy_ml$bws[1,2],1)),
-    paste(round(msofa_nobili_out_fuzzy_ml$coef[3],1), " (", round(msofa_nobili_out_fuzzy_ml$ci[3,1],1), ", ", round(msofa_nobili_out_fuzzy_ml$ci[3,2],1), ")"),
-    paste(round(msofa_nobili_out_fuzzy_ml$pv[3],3))
-    )
-)) %>% rename(c(`Analysis`=V1,`Bandwidth below the threshold`=V2, `Bandwidth above the threshold`=V3, `Local average treatment effect (Robust 95% CI)`=V4, `p-value`=V5))
-
-explanatory_el<-as.data.frame(rbind(
-  c("Respiratory SOFA component score in the 24-72 hours after hemoglobin measurement", 
-    paste(round(respiration_out_fuzzy_el$bws[1,1],1)),
-    paste(round(respiration_out_fuzzy_el$bws[1,2],1)),
-    paste(round(respiration_out_fuzzy_el$coef[3],1), " (", round(respiration_out_fuzzy_el$ci[3,1],1), ", ", round(respiration_out_fuzzy_el$ci[3,2],1), ")"),
-    paste(round(respiration_out_fuzzy_el$pv[3],3))
-    ),
-  c("Coagulation SOFA component score in the 24-72 hours after hemoglobin measurement", 
-    paste(round(coagulation_out_fuzzy_el$bws[1,1],1)),
-    paste(round(coagulation_out_fuzzy_el$bws[1,2],1)),
-    paste(round(coagulation_out_fuzzy_el$coef[3],1), " (", round(coagulation_out_fuzzy_el$ci[3,1],1), ", ", round(coagulation_out_fuzzy_el$ci[3,2],1), ")"),
-    paste(round(coagulation_out_fuzzy_el$pv[3],3))
-    ),
-  c("Liver SOFA component score in the 24-72 hours after hemoglobin measurement", 
-    paste(round(liver_out_fuzzy_el$bws[1,1],1)),
-    paste(round(liver_out_fuzzy_el$bws[1,2],1)),
-    paste(round(liver_out_fuzzy_el$coef[3],1), " (", round(liver_out_fuzzy_el$ci[3,1],1), ", ", round(liver_out_fuzzy_el$ci[3,2],1), ")"),
-    paste(round(liver_out_fuzzy_el$pv[3],3))
-    ),
-  c("Cardiovascular SOFA component score in the 24-72 hours after hemoglobin measurement", 
-    paste(round(cardiovascular_out_fuzzy_el$bws[1,1],1)),
-    paste(round(cardiovascular_out_fuzzy_el$bws[1,2],1)),
-    paste(round(cardiovascular_out_fuzzy_el$coef[3],1), " (", round(cardiovascular_out_fuzzy_el$ci[3,1],1), ", ", round(cardiovascular_out_fuzzy_el$ci[3,2],1), ")"),
-    paste(round(cardiovascular_out_fuzzy_el$pv[3],3))
-    ),
-  c("Central nervous system SOFA component score in the 24-72 hours after hemoglobin measurement", 
-    paste(round(cns_out_fuzzy_el$bws[1,1],1)),
-    paste(round(cns_out_fuzzy_el$bws[1,2],1)),
-    paste(round(cns_out_fuzzy_el$coef[3],1), " (", round(cns_out_fuzzy_el$ci[3,1],1), ", ", round(cns_out_fuzzy_el$ci[3,2],1), ")"),
-    paste(round(cns_out_fuzzy_el$pv[3],3))
-    ),
-  c("Renal SOFA component score in the 24-72 hours after hemoglobin measurement", 
-    paste(round(renal_out_fuzzy_el$bws[1,1],1)),
-    paste(round(renal_out_fuzzy_el$bws[1,2],1)),
-    paste(round(renal_out_fuzzy_el$coef[3],1), " (", round(renal_out_fuzzy_el$ci[3,1],1), ", ", round(renal_out_fuzzy_el$ci[3,2],1), ")"),
-    paste(round(renal_out_fuzzy_el$pv[3],3))
-    ),
-  c("Death SOFA component score in the 24-72 hours after hemoglobin measurement", 
-    paste(round(msofa_death_out_fuzzy_el$bws[1,1],1)),
-    paste(round(msofa_death_out_fuzzy_el$bws[1,2],1)),
-    paste(round(msofa_death_out_fuzzy_el$coef[3],1), " (", round(msofa_death_out_fuzzy_el$ci[3,1],1), ", ", round(msofa_death_out_fuzzy_el$ci[3,2],1), ")"),
-    paste(round(msofa_death_out_fuzzy_el$pv[3],3))
-    ),
-  c("Modified SOFA score primary outcome without liver component score in the 24-72 hours after hemoglobin measurement", 
-    paste(round(msofa_nobili_out_fuzzy_el$bws[1,1],1)),
-    paste(round(msofa_nobili_out_fuzzy_el$bws[1,2],1)),
-    paste(round(msofa_nobili_out_fuzzy_el$coef[3],1), " (", round(msofa_nobili_out_fuzzy_el$ci[3,1],1), ", ", round(msofa_nobili_out_fuzzy_el$ci[3,2],1), ")"),
-    paste(round(msofa_nobili_out_fuzzy_el$pv[3],3))
-    )
-)) %>% rename(c(`Analysis`=V1,`Bandwidth below the threshold`=V2, `Bandwidth above the threshold`=V3, `Local average treatment effect (Robust 95% CI)`=V4, `p-value`=V5))
-
-explanatory<-cbind(explanatory_ml, explanatory_el)
-
-# subgroups
-subgroup_ml<-as.data.frame(rbind(
-  c("Sepsis", 
-    paste(round(msofa_out_sepsis_fuzzy_ml$coef[3],1), " (", round(msofa_out_sepsis_fuzzy_ml$ci[3,1],1), ", ", round(msofa_out_sepsis_fuzzy_ml$ci[3,2],1), ")")
-    ),
-  c("No sepsis", 
-    paste(round(msofa_out_no_sepsis_fuzzy_ml$coef[3],1), " (", round(msofa_out_no_sepsis_fuzzy_ml$ci[3,1],1), ", ", round(msofa_out_no_sepsis_fuzzy_ml$ci[3,2],1), ")")
-    ),
-  c("Cardiac ICU", 
-    paste(round(msofa_out_cardiac_icu_fuzzy_ml$coef[3],1), " (", round(msofa_out_cardiac_icu_fuzzy_ml$ci[3,1],1), ", ", round(msofa_out_cardiac_icu_fuzzy_ml$ci[3,2],1), ")")
-    ),
-  c("Non-cardiac ICU", 
-    paste(round(msofa_out_no_cardiac_icu_fuzzy_ml$coef[3],1), " (", round(msofa_out_no_cardiac_icu_fuzzy_ml$ci[3,1],1), ", ", round(msofa_out_no_cardiac_icu_fuzzy_ml$ci[3,2],1), ")")
-    )
-)) %>% rename(c(`Subgroup`=V1,`Local average treatment effect - SOFA points (Robust 95% CI)`=V2)) %>% mutate(`p-value for interaction`=c(round((1-pnorm(abs((msofa_out_sepsis_fuzzy_ml$coef[3]-msofa_out_no_sepsis_fuzzy_ml$coef[3])/sqrt((msofa_out_sepsis_fuzzy_ml$se[3]^2)+(msofa_out_no_sepsis_fuzzy_ml$se[3]^2)))))*2, 3),NA,round((1-pnorm(abs((msofa_out_cardiac_icu_fuzzy_ml$coef[3]-msofa_out_no_cardiac_icu_fuzzy_ml$coef[3])/sqrt((msofa_out_cardiac_icu_fuzzy_ml$se[3]^2)+(msofa_out_no_cardiac_icu_fuzzy_ml$se[3]^2)))))*2, 3),NA))
-
-subgroup_el<-as.data.frame(rbind(
-  c("Sepsis", 
-    paste(round(msofa_out_sepsis_fuzzy_el$coef[3],1), " (", round(msofa_out_sepsis_fuzzy_el$ci[3,1],1), ", ", round(msofa_out_sepsis_fuzzy_el$ci[3,2],1), ")")
-    ),
-  c("No sepsis", 
-    paste(round(msofa_out_no_sepsis_fuzzy_el$coef[3],1), " (", round(msofa_out_no_sepsis_fuzzy_el$ci[3,1],1), ", ", round(msofa_out_no_sepsis_fuzzy_el$ci[3,2],1), ")")
-    ),
-  c("Cardiac ICU", 
-    paste(round(msofa_out_cardiac_icu_fuzzy_el$coef[3],1), " (", round(msofa_out_cardiac_icu_fuzzy_el$ci[3,1],1), ", ", round(msofa_out_cardiac_icu_fuzzy_el$ci[3,2],1), ")")
-    ),
-  c("Non-cardiac ICU", 
-    paste(round(msofa_out_no_cardiac_icu_fuzzy_el$coef[3],1), " (", round(msofa_out_no_cardiac_icu_fuzzy_el$ci[3,1],1), ", ", round(msofa_out_no_cardiac_icu_fuzzy_el$ci[3,2],1), ")")
-    )
-)) %>% rename(c(`Subgroup`=V1,`Local average treatment effect - SOFA points (Robust 95% CI)`=V2)) %>% mutate(`p-value for interaction`=c(round((1-pnorm(abs((msofa_out_sepsis_fuzzy_el$coef[3]-msofa_out_no_sepsis_fuzzy_el$coef[3])/sqrt((msofa_out_sepsis_fuzzy_el$se[3]^2)+(msofa_out_no_sepsis_fuzzy_el$se[3]^2)))))*2, 3),NA,round((1-pnorm(abs((msofa_out_cardiac_icu_fuzzy_el$coef[3]-msofa_out_no_cardiac_icu_fuzzy_el$coef[3])/sqrt((msofa_out_cardiac_icu_fuzzy_el$se[3]^2)+(msofa_out_no_cardiac_icu_fuzzy_el$se[3]^2)))))*2, 3),NA))
-
-subgroup<-cbind(subgroup_ml, subgroup_el)
-```
-
-
-# Subgroups
-```{r tables}
-kable(table1)
-kable(exposure)
-kable(outcomes)
-kable(sensitivty)
-kable(explanatory)
-kable(subgroup)
-
-#e-value
-evalues.OLS(est=msofa_out_fuzzy_ml$coef[3], se=msofa_out_fuzzy_ml$se[3], sd=sd(ml$msofa_out))
-evalues.OLS(est=msofa_out_fuzzy_el$coef[3], se=msofa_out_fuzzy_el$se[3], sd=sd(el$msofa_out))
-
-#number of patients in subgroups
-nrow(distinct(msep %>% select(subject_id)))
-nrow(distinct(mnsep %>% select(subject_id)))
-nrow(distinct(mlc %>% select(subject_id)))
-nrow(distinct(mlnc %>% select(subject_id)))
-
-nrow(distinct(esep %>% select(subject_id)))
-nrow(distinct(ensep %>% select(subject_id)))
-nrow(distinct(elc %>% select(subject_id)))
-nrow(distinct(elnc %>% select(subject_id)))
-```
 
 
 
@@ -1407,12 +553,8 @@ nrow(distinct(elnc %>% select(subject_id)))
 # Figure 1 data and first paragraph data MIMIC
 ```{r figure 1 MIMIC}
 # figure 1 mimic
-a<-distinct(read.csv(file="icustay_detail.csv", stringsAsFactors = FALSE) %>% select(subject_id)) #patients
+a<-icu %>% group_by(subject_id) %>% slice(1L) #patients
 nrow(a)
-
-#intermediate care unit only
-b<-distinct(icu %>% select(subject_id)) #patients not in intermediate care unit
-nrow(a)-nrow(b)
 
 #have hemoglobins from 2-28 and not just last
 c<-distinct(mimic %>% select(subject_id))
@@ -1467,12 +609,15 @@ nrow(c)-nrow(d)
 f2<-distinct(eicu22 %>% select(subject_id))
 nrow(d)-nrow(f2)
 
-# final cohort
-f<-distinct(el %>% select(subject_id))
+# random cohort
+f<-distinct(el1 %>% select(subject_id))
 nrow(f2)-nrow(f)
 
+# admitted to hospital that did not routinely transsfuse at hemoglboin threshold
 nrow(distinct(el %>% select(subject_id)))
-nrow(el)
+nrow(f)-nrow(el)
+
+
 
 # by arm
 msofa_out_sharp_el$N_h
@@ -1492,5 +637,1793 @@ nrow(distinct(read.csv(file="eicu_icu.csv", stringsAsFactors = FALSE) %>% select
 
 # median hgbs
 summary(el$hgb)
+```
+
+
+
+# import data tables  
+```{r import}
+icd_lu <- fread("/project/walkelab/Premier Raw Data/Full cohort/bu_icdcode.txt.gz", 
+    sep="|")
+
+bill_lu <- fread("/project/walkelab/Premier Raw Data/Full cohort/bu_chgmstr.txt.gz", 
+    sep="|")
+
+prov<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_providers.txt.gz", sep="|")
+
+physpec<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_physpec.txt.gz", sep="|")
+
+icd_diag20161<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20161_paticd_diag.txt.gz", sep="|") %>% mutate(year=2016)
+icd_diag20162<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20162_paticd_diag.txt.gz", sep="|") %>% mutate(year=2016)
+icd_diag20163<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20163_paticd_diag.txt.gz", sep="|") %>% mutate(year=2016)
+icd_diag20164<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20164_paticd_diag.txt.gz", sep="|") %>% mutate(year=2016)
+icd_diag20171<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20171_paticd_diag.txt.gz", sep="|") %>% mutate(year=2017)
+icd_diag20172<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20172_paticd_diag.txt.gz", sep="|") %>% mutate(year=2017)
+icd_diag20173<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20173_paticd_diag.txt.gz", sep="|") %>% mutate(year=2017)
+icd_diag20174<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20174_paticd_diag.txt.gz", sep="|") %>% mutate(year=2017)
+icd_diag20181<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20181_paticd_diag.txt.gz", sep="|") %>% mutate(year=2018)
+icd_diag20182<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20182_paticd_diag.txt.gz", sep="|") %>% mutate(year=2018)
+icd_diag20183<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20183_paticd_diag.txt.gz", sep="|") %>% mutate(year=2018)
+icd_diag20184<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20184_paticd_diag.txt.gz", sep="|") %>% mutate(year=2018)
+icd_diag20191<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20191_paticd_diag.txt.gz", sep="|") %>% mutate(year=2019)
+icd_diag20192<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20192_paticd_diag.txt.gz", sep="|") %>% mutate(year=2019)
+icd_diag20193<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20193_paticd_diag.txt.gz", sep="|") %>% mutate(year=2019)
+icd_diag20194<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20194_paticd_diag.txt.gz", sep="|") %>% mutate(year=2019)
+icd_diag20201<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20201_paticd_diag.txt.gz", sep="|") %>% mutate(year=2020)
+icd_diag20202<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20202_paticd_diag.txt.gz", sep="|") %>% mutate(year=2020)
+icd_diag20203<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20203_paticd_diag.txt.gz", sep="|") %>% mutate(year=2020)
+icd_diag20204<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20204_paticd_diag.txt.gz", sep="|") %>% mutate(year=2020)
+
+
+icd_proc20161<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20161_paticd_proc.txt.gz", sep="|") %>% mutate(year=2016)
+icd_proc20162<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20162_paticd_proc.txt.gz", sep="|") %>% mutate(year=2016)
+icd_proc20163<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20163_paticd_proc.txt.gz", sep="|") %>% mutate(year=2016)
+icd_proc20164<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20164_paticd_proc.txt.gz", sep="|") %>% mutate(year=2016)
+icd_proc20171<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20171_paticd_proc.txt.gz", sep="|") %>% mutate(year=2017)
+icd_proc20172<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20172_paticd_proc.txt.gz", sep="|") %>% mutate(year=2017)
+icd_proc20173<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20173_paticd_proc.txt.gz", sep="|") %>% mutate(year=2017)
+icd_proc20174<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20174_paticd_proc.txt.gz", sep="|") %>% mutate(year=2017)
+icd_proc20181<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20181_paticd_proc.txt.gz", sep="|") %>% mutate(year=2018)
+icd_proc20182<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20182_paticd_proc.txt.gz", sep="|") %>% mutate(year=2018)
+icd_proc20183<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20183_paticd_proc.txt.gz", sep="|") %>% mutate(year=2018)
+icd_proc20184<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20184_paticd_proc.txt.gz", sep="|") %>% mutate(year=2018)
+icd_proc20191<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20191_paticd_proc.txt.gz", sep="|") %>% mutate(year=2019)
+icd_proc20192<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20192_paticd_proc.txt.gz", sep="|") %>% mutate(year=2019)
+icd_proc20193<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20193_paticd_proc.txt.gz", sep="|") %>% mutate(year=2019)
+icd_proc20194<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20194_paticd_proc.txt.gz", sep="|") %>% mutate(year=2019)
+icd_proc20201<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20201_paticd_proc.txt.gz", sep="|") %>% mutate(year=2020)
+icd_proc20202<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20202_paticd_proc.txt.gz", sep="|") %>% mutate(year=2020)
+icd_proc20203<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20203_paticd_proc.txt.gz", sep="|") %>% mutate(year=2020)
+icd_proc20204<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20204_paticd_proc.txt.gz", sep="|") %>% mutate(year=2020)
+
+
+demo20161<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20161_patdemo.txt.gz", sep="|") %>% mutate(year=2016)
+demo20162<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20162_patdemo.txt.gz", sep="|") %>% mutate(year=2016)
+demo20163<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20163_patdemo.txt.gz", sep="|") %>% mutate(year=2016)
+demo20164<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20164_patdemo.txt.gz", sep="|") %>% mutate(year=2016)
+demo20171<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20171_patdemo.txt.gz", sep="|") %>% mutate(year=2017)
+demo20172<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20172_patdemo.txt.gz", sep="|") %>% mutate(year=2017)
+demo20173<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20173_patdemo.txt.gz", sep="|") %>% mutate(year=2017)
+demo20174<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20174_patdemo.txt.gz", sep="|") %>% mutate(year=2017)
+demo20181<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20181_patdemo.txt.gz", sep="|") %>% mutate(year=2018)
+demo20182<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20182_patdemo.txt.gz", sep="|") %>% mutate(year=2018)
+demo20183<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20183_patdemo.txt.gz", sep="|") %>% mutate(year=2018)
+demo20184<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20184_patdemo.txt.gz", sep="|") %>% mutate(year=2018)
+demo20191<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20191_patdemo.txt.gz", sep="|") %>% mutate(year=2019)
+demo20192<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20192_patdemo.txt.gz", sep="|") %>% mutate(year=2019)
+demo20193<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20193_patdemo.txt.gz", sep="|") %>% mutate(year=2019)
+demo20194<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20194_patdemo.txt.gz", sep="|") %>% mutate(year=2019)
+demo20201<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20201_patdemo.txt.gz", sep="|") %>% mutate(year=2020)
+demo20202<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20202_patdemo.txt.gz", sep="|") %>% mutate(year=2020)
+demo20203<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20203_patdemo.txt.gz", sep="|") %>% mutate(year=2020)
+demo20204<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20204_patdemo.txt.gz", sep="|") %>% mutate(year=2020)
+
+
+genlab20161<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20161_genlab.txt.gz", sep="|") %>% mutate(year=2016)
+genlab20162<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20162_genlab.txt.gz", sep="|") %>% mutate(year=2016)
+genlab20163<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20163_genlab.txt.gz", sep="|") %>% mutate(year=2016)
+genlab20164<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20164_genlab.txt.gz", sep="|") %>% mutate(year=2016)
+genlab20171<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20171_genlab.txt.gz", sep="|") %>% mutate(year=2017)
+genlab20172<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20172_genlab.txt.gz", sep="|") %>% mutate(year=2017)
+genlab20173<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20173_genlab.txt.gz", sep="|") %>% mutate(year=2017)
+genlab20174<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20174_genlab.txt.gz", sep="|") %>% mutate(year=2017)
+genlab20181<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20181_genlab.txt.gz", sep="|") %>% mutate(year=2018)
+genlab20182<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20182_genlab.txt.gz", sep="|") %>% mutate(year=2018)
+genlab20183<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20183_genlab.txt.gz", sep="|") %>% mutate(year=2018)
+genlab20184<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20184_genlab.txt.gz", sep="|") %>% mutate(year=2018)
+genlab20191<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20191_genlab.txt.gz", sep="|") %>% mutate(year=2019)
+genlab20192<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20192_genlab.txt.gz", sep="|") %>% mutate(year=2019)
+genlab20193<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20193_genlab.txt.gz", sep="|") %>% mutate(year=2019)
+genlab20194<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20194_genlab.txt.gz", sep="|") %>% mutate(year=2019)
+genlab20201<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20201_genlab.txt.gz", sep="|") %>% mutate(year=2020)
+genlab20202<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20202_genlab.txt.gz", sep="|") %>% mutate(year=2020)
+genlab20203<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20203_genlab.txt.gz", sep="|") %>% mutate(year=2020)
+genlab20204<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20204_genlab.txt.gz", sep="|") %>% mutate(year=2020)
+
+hgb20161<- genlab20161 %>% filter(!is.na(NUMERIC_VALUE) & LAB_TEST_LOINC_DESC %in% c("Hemoglobin:MCnc:Pt:Bld:Qn:", "Hemoglobin:MCnc:Pt:BldA:Qn:", "Hemoglobin:MCnc:Pt:Bld:Qn", "Hemoglobin:MCnc:Pt:Bld:Qn:Calculated", "Hemoglobin:MCnc:Pt:BldA:Qn:Oximetry", "Hemoglobin:MCnc:Pt:BldV:Qn:", "Hemoglobin:MCnc:Pt:BldA:Qn", "Hemoglobin:MCnc:Pt:BldV:Qn", "Hemoglobin:MCnc:Pt:Bld:Qn:Oximetry")) %>% mutate(hgb=as.numeric(NUMERIC_VALUE), hgb_day=RESULT_DAY_NUMBER) %>% dplyr::select(PAT_KEY, hgb, hgb_day, RESULT_TIME_OF_DAY)
+hgb20162<- genlab20162 %>% filter(!is.na(NUMERIC_VALUE) & LAB_TEST_LOINC_DESC %in% c("Hemoglobin:MCnc:Pt:Bld:Qn:", "Hemoglobin:MCnc:Pt:BldA:Qn:", "Hemoglobin:MCnc:Pt:Bld:Qn", "Hemoglobin:MCnc:Pt:Bld:Qn:Calculated", "Hemoglobin:MCnc:Pt:BldA:Qn:Oximetry", "Hemoglobin:MCnc:Pt:BldV:Qn:", "Hemoglobin:MCnc:Pt:BldA:Qn", "Hemoglobin:MCnc:Pt:BldV:Qn", "Hemoglobin:MCnc:Pt:Bld:Qn:Oximetry")) %>% mutate(hgb=as.numeric(NUMERIC_VALUE), hgb_day=RESULT_DAY_NUMBER) %>% dplyr::select(PAT_KEY, hgb, hgb_day, RESULT_TIME_OF_DAY)
+hgb20163<- genlab20163 %>% filter(!is.na(NUMERIC_VALUE) & LAB_TEST_LOINC_DESC %in% c("Hemoglobin:MCnc:Pt:Bld:Qn:", "Hemoglobin:MCnc:Pt:BldA:Qn:", "Hemoglobin:MCnc:Pt:Bld:Qn", "Hemoglobin:MCnc:Pt:Bld:Qn:Calculated", "Hemoglobin:MCnc:Pt:BldA:Qn:Oximetry", "Hemoglobin:MCnc:Pt:BldV:Qn:", "Hemoglobin:MCnc:Pt:BldA:Qn", "Hemoglobin:MCnc:Pt:BldV:Qn", "Hemoglobin:MCnc:Pt:Bld:Qn:Oximetry")) %>% mutate(hgb=as.numeric(NUMERIC_VALUE), hgb_day=RESULT_DAY_NUMBER) %>% dplyr::select(PAT_KEY, hgb, hgb_day, RESULT_TIME_OF_DAY)
+hgb20164<- genlab20164 %>% filter(!is.na(NUMERIC_VALUE) & LAB_TEST_LOINC_DESC %in% c("Hemoglobin:MCnc:Pt:Bld:Qn:", "Hemoglobin:MCnc:Pt:BldA:Qn:", "Hemoglobin:MCnc:Pt:Bld:Qn", "Hemoglobin:MCnc:Pt:Bld:Qn:Calculated", "Hemoglobin:MCnc:Pt:BldA:Qn:Oximetry", "Hemoglobin:MCnc:Pt:BldV:Qn:", "Hemoglobin:MCnc:Pt:BldA:Qn", "Hemoglobin:MCnc:Pt:BldV:Qn", "Hemoglobin:MCnc:Pt:Bld:Qn:Oximetry")) %>% mutate(hgb=as.numeric(NUMERIC_VALUE), hgb_day=RESULT_DAY_NUMBER) %>% dplyr::select(PAT_KEY, hgb, hgb_day, RESULT_TIME_OF_DAY)
+
+hgb20171<- genlab20171 %>% filter(!is.na(NUMERIC_VALUE) & LAB_TEST_LOINC_DESC %in% c("Hemoglobin:MCnc:Pt:Bld:Qn:", "Hemoglobin:MCnc:Pt:BldA:Qn:", "Hemoglobin:MCnc:Pt:Bld:Qn", "Hemoglobin:MCnc:Pt:Bld:Qn:Calculated", "Hemoglobin:MCnc:Pt:BldA:Qn:Oximetry", "Hemoglobin:MCnc:Pt:BldV:Qn:", "Hemoglobin:MCnc:Pt:BldA:Qn", "Hemoglobin:MCnc:Pt:BldV:Qn", "Hemoglobin:MCnc:Pt:Bld:Qn:Oximetry")) %>% mutate(hgb=as.numeric(NUMERIC_VALUE), hgb_day=RESULT_DAY_NUMBER) %>% dplyr::select(PAT_KEY, hgb, hgb_day, RESULT_TIME_OF_DAY)
+hgb20172<- genlab20172 %>% filter(!is.na(NUMERIC_VALUE) & LAB_TEST_LOINC_DESC %in% c("Hemoglobin:MCnc:Pt:Bld:Qn:", "Hemoglobin:MCnc:Pt:BldA:Qn:", "Hemoglobin:MCnc:Pt:Bld:Qn", "Hemoglobin:MCnc:Pt:Bld:Qn:Calculated", "Hemoglobin:MCnc:Pt:BldA:Qn:Oximetry", "Hemoglobin:MCnc:Pt:BldV:Qn:", "Hemoglobin:MCnc:Pt:BldA:Qn", "Hemoglobin:MCnc:Pt:BldV:Qn", "Hemoglobin:MCnc:Pt:Bld:Qn:Oximetry")) %>% mutate(hgb=as.numeric(NUMERIC_VALUE), hgb_day=RESULT_DAY_NUMBER) %>% dplyr::select(PAT_KEY, hgb, hgb_day, RESULT_TIME_OF_DAY)
+hgb20173<- genlab20173 %>% filter(!is.na(NUMERIC_VALUE) & LAB_TEST_LOINC_DESC %in% c("Hemoglobin:MCnc:Pt:Bld:Qn:", "Hemoglobin:MCnc:Pt:BldA:Qn:", "Hemoglobin:MCnc:Pt:Bld:Qn", "Hemoglobin:MCnc:Pt:Bld:Qn:Calculated", "Hemoglobin:MCnc:Pt:BldA:Qn:Oximetry", "Hemoglobin:MCnc:Pt:BldV:Qn:", "Hemoglobin:MCnc:Pt:BldA:Qn", "Hemoglobin:MCnc:Pt:BldV:Qn", "Hemoglobin:MCnc:Pt:Bld:Qn:Oximetry")) %>% mutate(hgb=as.numeric(NUMERIC_VALUE), hgb_day=RESULT_DAY_NUMBER) %>% dplyr::select(PAT_KEY, hgb, hgb_day, RESULT_TIME_OF_DAY)
+hgb20174<- genlab20174 %>% filter(!is.na(NUMERIC_VALUE) & LAB_TEST_LOINC_DESC %in% c("Hemoglobin:MCnc:Pt:Bld:Qn:", "Hemoglobin:MCnc:Pt:BldA:Qn:", "Hemoglobin:MCnc:Pt:Bld:Qn", "Hemoglobin:MCnc:Pt:Bld:Qn:Calculated", "Hemoglobin:MCnc:Pt:BldA:Qn:Oximetry", "Hemoglobin:MCnc:Pt:BldV:Qn:", "Hemoglobin:MCnc:Pt:BldA:Qn", "Hemoglobin:MCnc:Pt:BldV:Qn", "Hemoglobin:MCnc:Pt:Bld:Qn:Oximetry")) %>% mutate(hgb=as.numeric(NUMERIC_VALUE), hgb_day=RESULT_DAY_NUMBER) %>% dplyr::select(PAT_KEY, hgb, hgb_day, RESULT_TIME_OF_DAY)
+
+hgb20181<- genlab20181 %>% filter(!is.na(NUMERIC_VALUE) & LAB_TEST_LOINC_DESC %in% c("Hemoglobin:MCnc:Pt:Bld:Qn:", "Hemoglobin:MCnc:Pt:BldA:Qn:", "Hemoglobin:MCnc:Pt:Bld:Qn", "Hemoglobin:MCnc:Pt:Bld:Qn:Calculated", "Hemoglobin:MCnc:Pt:BldA:Qn:Oximetry", "Hemoglobin:MCnc:Pt:BldV:Qn:", "Hemoglobin:MCnc:Pt:BldA:Qn", "Hemoglobin:MCnc:Pt:BldV:Qn", "Hemoglobin:MCnc:Pt:Bld:Qn:Oximetry")) %>% mutate(hgb=as.numeric(NUMERIC_VALUE), hgb_day=RESULT_DAY_NUMBER) %>% dplyr::select(PAT_KEY, hgb, hgb_day, RESULT_TIME_OF_DAY)
+hgb20182<- genlab20182 %>% filter(!is.na(NUMERIC_VALUE) & LAB_TEST_LOINC_DESC %in% c("Hemoglobin:MCnc:Pt:Bld:Qn:", "Hemoglobin:MCnc:Pt:BldA:Qn:", "Hemoglobin:MCnc:Pt:Bld:Qn", "Hemoglobin:MCnc:Pt:Bld:Qn:Calculated", "Hemoglobin:MCnc:Pt:BldA:Qn:Oximetry", "Hemoglobin:MCnc:Pt:BldV:Qn:", "Hemoglobin:MCnc:Pt:BldA:Qn", "Hemoglobin:MCnc:Pt:BldV:Qn", "Hemoglobin:MCnc:Pt:Bld:Qn:Oximetry")) %>% mutate(hgb=as.numeric(NUMERIC_VALUE), hgb_day=RESULT_DAY_NUMBER) %>% dplyr::select(PAT_KEY, hgb, hgb_day, RESULT_TIME_OF_DAY)
+hgb20183<- genlab20183 %>% filter(!is.na(NUMERIC_VALUE) & LAB_TEST_LOINC_DESC %in% c("Hemoglobin:MCnc:Pt:Bld:Qn:", "Hemoglobin:MCnc:Pt:BldA:Qn:", "Hemoglobin:MCnc:Pt:Bld:Qn", "Hemoglobin:MCnc:Pt:Bld:Qn:Calculated", "Hemoglobin:MCnc:Pt:BldA:Qn:Oximetry", "Hemoglobin:MCnc:Pt:BldV:Qn:", "Hemoglobin:MCnc:Pt:BldA:Qn", "Hemoglobin:MCnc:Pt:BldV:Qn", "Hemoglobin:MCnc:Pt:Bld:Qn:Oximetry")) %>% mutate(hgb=as.numeric(NUMERIC_VALUE), hgb_day=RESULT_DAY_NUMBER) %>% dplyr::select(PAT_KEY, hgb, hgb_day, RESULT_TIME_OF_DAY)
+hgb20184<- genlab20184 %>% filter(!is.na(NUMERIC_VALUE) & LAB_TEST_LOINC_DESC %in% c("Hemoglobin:MCnc:Pt:Bld:Qn:", "Hemoglobin:MCnc:Pt:BldA:Qn:", "Hemoglobin:MCnc:Pt:Bld:Qn", "Hemoglobin:MCnc:Pt:Bld:Qn:Calculated", "Hemoglobin:MCnc:Pt:BldA:Qn:Oximetry", "Hemoglobin:MCnc:Pt:BldV:Qn:", "Hemoglobin:MCnc:Pt:BldA:Qn", "Hemoglobin:MCnc:Pt:BldV:Qn", "Hemoglobin:MCnc:Pt:Bld:Qn:Oximetry")) %>% mutate(hgb=as.numeric(NUMERIC_VALUE), hgb_day=RESULT_DAY_NUMBER) %>% dplyr::select(PAT_KEY, hgb, hgb_day, RESULT_TIME_OF_DAY)
+
+hgb20191<- genlab20191 %>% filter(!is.na(NUMERIC_VALUE) & LAB_TEST_LOINC_DESC %in% c("Hemoglobin:MCnc:Pt:Bld:Qn:", "Hemoglobin:MCnc:Pt:BldA:Qn:", "Hemoglobin:MCnc:Pt:Bld:Qn", "Hemoglobin:MCnc:Pt:Bld:Qn:Calculated", "Hemoglobin:MCnc:Pt:BldA:Qn:Oximetry", "Hemoglobin:MCnc:Pt:BldV:Qn:", "Hemoglobin:MCnc:Pt:BldA:Qn", "Hemoglobin:MCnc:Pt:BldV:Qn", "Hemoglobin:MCnc:Pt:Bld:Qn:Oximetry")) %>% mutate(hgb=as.numeric(NUMERIC_VALUE), hgb_day=RESULT_DAY_NUMBER) %>% dplyr::select(PAT_KEY, hgb, hgb_day, RESULT_TIME_OF_DAY)
+hgb20192<- genlab20192 %>% filter(!is.na(NUMERIC_VALUE) & LAB_TEST_LOINC_DESC %in% c("Hemoglobin:MCnc:Pt:Bld:Qn:", "Hemoglobin:MCnc:Pt:BldA:Qn:", "Hemoglobin:MCnc:Pt:Bld:Qn", "Hemoglobin:MCnc:Pt:Bld:Qn:Calculated", "Hemoglobin:MCnc:Pt:BldA:Qn:Oximetry", "Hemoglobin:MCnc:Pt:BldV:Qn:", "Hemoglobin:MCnc:Pt:BldA:Qn", "Hemoglobin:MCnc:Pt:BldV:Qn", "Hemoglobin:MCnc:Pt:Bld:Qn:Oximetry")) %>% mutate(hgb=as.numeric(NUMERIC_VALUE), hgb_day=RESULT_DAY_NUMBER) %>% dplyr::select(PAT_KEY, hgb, hgb_day, RESULT_TIME_OF_DAY)
+hgb20193<- genlab20193 %>% filter(!is.na(NUMERIC_VALUE) & LAB_TEST_LOINC_DESC %in% c("Hemoglobin:MCnc:Pt:Bld:Qn:", "Hemoglobin:MCnc:Pt:BldA:Qn:", "Hemoglobin:MCnc:Pt:Bld:Qn", "Hemoglobin:MCnc:Pt:Bld:Qn:Calculated", "Hemoglobin:MCnc:Pt:BldA:Qn:Oximetry", "Hemoglobin:MCnc:Pt:BldV:Qn:", "Hemoglobin:MCnc:Pt:BldA:Qn", "Hemoglobin:MCnc:Pt:BldV:Qn", "Hemoglobin:MCnc:Pt:Bld:Qn:Oximetry")) %>% mutate(hgb=as.numeric(NUMERIC_VALUE), hgb_day=RESULT_DAY_NUMBER) %>% dplyr::select(PAT_KEY, hgb, hgb_day, RESULT_TIME_OF_DAY)
+hgb20194<- genlab20194 %>% filter(!is.na(NUMERIC_VALUE) & LAB_TEST_LOINC_DESC %in% c("Hemoglobin:MCnc:Pt:Bld:Qn:", "Hemoglobin:MCnc:Pt:BldA:Qn:", "Hemoglobin:MCnc:Pt:Bld:Qn", "Hemoglobin:MCnc:Pt:Bld:Qn:Calculated", "Hemoglobin:MCnc:Pt:BldA:Qn:Oximetry", "Hemoglobin:MCnc:Pt:BldV:Qn:", "Hemoglobin:MCnc:Pt:BldA:Qn", "Hemoglobin:MCnc:Pt:BldV:Qn", "Hemoglobin:MCnc:Pt:Bld:Qn:Oximetry")) %>% mutate(hgb=as.numeric(NUMERIC_VALUE), hgb_day=RESULT_DAY_NUMBER) %>% dplyr::select(PAT_KEY, hgb, hgb_day, RESULT_TIME_OF_DAY)
+
+hgb20201<- genlab20201 %>% filter(!is.na(NUMERIC_VALUE) & LAB_TEST_LOINC_DESC %in% c("Hemoglobin:MCnc:Pt:Bld:Qn:", "Hemoglobin:MCnc:Pt:BldA:Qn:", "Hemoglobin:MCnc:Pt:Bld:Qn", "Hemoglobin:MCnc:Pt:Bld:Qn:Calculated", "Hemoglobin:MCnc:Pt:BldA:Qn:Oximetry", "Hemoglobin:MCnc:Pt:BldV:Qn:", "Hemoglobin:MCnc:Pt:BldA:Qn", "Hemoglobin:MCnc:Pt:BldV:Qn", "Hemoglobin:MCnc:Pt:Bld:Qn:Oximetry")) %>% mutate(hgb=as.numeric(NUMERIC_VALUE), hgb_day=RESULT_DAY_NUMBER) %>% dplyr::select(PAT_KEY, hgb, hgb_day, RESULT_TIME_OF_DAY)
+hgb20202<- genlab20202 %>% filter(!is.na(NUMERIC_VALUE) & LAB_TEST_LOINC_DESC %in% c("Hemoglobin:MCnc:Pt:Bld:Qn:", "Hemoglobin:MCnc:Pt:BldA:Qn:", "Hemoglobin:MCnc:Pt:Bld:Qn", "Hemoglobin:MCnc:Pt:Bld:Qn:Calculated", "Hemoglobin:MCnc:Pt:BldA:Qn:Oximetry", "Hemoglobin:MCnc:Pt:BldV:Qn:", "Hemoglobin:MCnc:Pt:BldA:Qn", "Hemoglobin:MCnc:Pt:BldV:Qn", "Hemoglobin:MCnc:Pt:Bld:Qn:Oximetry")) %>% mutate(hgb=as.numeric(NUMERIC_VALUE), hgb_day=RESULT_DAY_NUMBER) %>% dplyr::select(PAT_KEY, hgb, hgb_day, RESULT_TIME_OF_DAY)
+hgb20203<- genlab20203 %>% filter(!is.na(NUMERIC_VALUE) & LAB_TEST_LOINC_DESC %in% c("Hemoglobin:MCnc:Pt:Bld:Qn:", "Hemoglobin:MCnc:Pt:BldA:Qn:", "Hemoglobin:MCnc:Pt:Bld:Qn", "Hemoglobin:MCnc:Pt:Bld:Qn:Calculated", "Hemoglobin:MCnc:Pt:BldA:Qn:Oximetry", "Hemoglobin:MCnc:Pt:BldV:Qn:", "Hemoglobin:MCnc:Pt:BldA:Qn", "Hemoglobin:MCnc:Pt:BldV:Qn", "Hemoglobin:MCnc:Pt:Bld:Qn:Oximetry")) %>% mutate(hgb=as.numeric(NUMERIC_VALUE), hgb_day=RESULT_DAY_NUMBER) %>% dplyr::select(PAT_KEY, hgb, hgb_day, RESULT_TIME_OF_DAY)
+hgb20204<- genlab20204 %>% filter(!is.na(NUMERIC_VALUE) & LAB_TEST_LOINC_DESC %in% c("Hemoglobin:MCnc:Pt:Bld:Qn:", "Hemoglobin:MCnc:Pt:BldA:Qn:", "Hemoglobin:MCnc:Pt:Bld:Qn", "Hemoglobin:MCnc:Pt:Bld:Qn:Calculated", "Hemoglobin:MCnc:Pt:BldA:Qn:Oximetry", "Hemoglobin:MCnc:Pt:BldV:Qn:", "Hemoglobin:MCnc:Pt:BldA:Qn", "Hemoglobin:MCnc:Pt:BldV:Qn", "Hemoglobin:MCnc:Pt:Bld:Qn:Oximetry")) %>% mutate(hgb=as.numeric(NUMERIC_VALUE), hgb_day=RESULT_DAY_NUMBER) %>% dplyr::select(PAT_KEY, hgb, hgb_day, RESULT_TIME_OF_DAY)
+
+hgb<-bind_rows(hgb20161, hgb20162, hgb20163, hgb20164, hgb20171, hgb20172, hgb20173, hgb20174, hgb20181, hgb20182, hgb20183, hgb20184, hgb20191, hgb20192, hgb20193, hgb20194, hgb20201, hgb20202, hgb20203, hgb20204) %>% filter(!is.na(hgb) & !is.na(hgb_day) & hgb<30 & hgb>1) %>% mutate(hgb=round(hgb,1))
+
+hgb_pt<- hgb %>%
+  group_by(PAT_KEY) %>%
+  slice(1L) %>%
+  mutate(hgb_pt=1) %>%
+  dplyr::select(PAT_KEY, hgb_pt)
+
+
+bill20161<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20161_patbill.txt.gz", sep="|") %>% mutate(year=2016) %>% inner_join(hgb_pt)
+bill20162<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20162_patbill.txt.gz", sep="|") %>% mutate(year=2016) %>% inner_join(hgb_pt)
+bill20163<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20163_patbill.txt.gz", sep="|") %>% mutate(year=2016) %>% inner_join(hgb_pt)
+bill20164<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20164_patbill.txt.gz", sep="|") %>% mutate(year=2016) %>% inner_join(hgb_pt)
+bill20171<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20171_patbill.txt.gz", sep="|") %>% mutate(year=2017) %>% inner_join(hgb_pt)
+bill20172<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20172_patbill.txt.gz", sep="|") %>% mutate(year=2017) %>% inner_join(hgb_pt)
+bill20173<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20173_patbill.txt.gz", sep="|") %>% mutate(year=2017) %>% inner_join(hgb_pt)
+bill20174<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20174_patbill.txt.gz", sep="|") %>% mutate(year=2017) %>% inner_join(hgb_pt)
+bill20181<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20181_patbill.txt.gz", sep="|") %>% mutate(year=2018) %>% inner_join(hgb_pt)
+bill20182<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20182_patbill.txt.gz", sep="|") %>% mutate(year=2018) %>% inner_join(hgb_pt)
+bill20183<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20183_patbill.txt.gz", sep="|") %>% mutate(year=2018) %>% inner_join(hgb_pt)
+bill20184<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20184_patbill.txt.gz", sep="|") %>% mutate(year=2018) %>% inner_join(hgb_pt)
+bill20191<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20191_patbill.txt.gz", sep="|") %>% mutate(year=2019) %>% inner_join(hgb_pt)
+bill20192<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20192_patbill.txt.gz", sep="|") %>% mutate(year=2019) %>% inner_join(hgb_pt)
+bill20193<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20193_patbill.txt.gz", sep="|") %>% mutate(year=2019) %>% inner_join(hgb_pt)
+bill20194<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20194_patbill.txt.gz", sep="|") %>% mutate(year=2019) %>% inner_join(hgb_pt)
+bill20201<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20201_patbill.txt.gz", sep="|") %>% mutate(year=2020) %>% inner_join(hgb_pt)
+bill20202<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20202_patbill.txt.gz", sep="|") %>% mutate(year=2020) %>% inner_join(hgb_pt)
+bill20203<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20203_patbill.txt.gz", sep="|") %>% mutate(year=2020) %>% inner_join(hgb_pt)
+bill20204<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20204_patbill.txt.gz", sep="|") %>% mutate(year=2020) %>% inner_join(hgb_pt)
+
+sofa<-bind_rows(fread("sofa2016.csv", sep=",") %>% filter(!is.na(daily_sofa) & !is.na(day)),
+fread("sofa2017.csv", sep=",") %>% filter(!is.na(daily_sofa) & !is.na(day)),
+fread("sofa2018.csv", sep=",") %>% filter(!is.na(daily_sofa) & !is.na(day)),
+fread("sofa2019.csv", sep=",") %>% filter(!is.na(daily_sofa) & !is.na(day)),
+fread("sofa2020.csv", sep=",") %>% filter(!is.na(daily_sofa) & !is.na(day)))
+
+#changing sofa to nate et al cardiovascular component
+sofa$cardiovascular<-0
+sofa$cardiovascular[sofa$pressor_inotrope==1 & !is.na(sofa$pressor_inotrope)]<-2
+sofa$cardiovascular[sofa$pressor_inotrope==2 & !is.na(sofa$pressor_inotrope)]<-3
+sofa$cardiovascular[sofa$pressor_inotrope>=3 & !is.na(sofa$pressor_inotrope)]<-4
+
+sofa1<- sofa %>%
+  mutate(daily_sofa=cardiovascular+respiratory+nervous+coagulation+liver+kidneys)
 
 ```
+
+
+# inclusion/exclusion wrangling
+```{r wrangling1}
+# icd_diag binding
+icd_diag<-bind_rows(
+    icd_diag20161, icd_diag20162, icd_diag20163, icd_diag20164,
+    icd_diag20171, icd_diag20172, icd_diag20173, icd_diag20174,
+    icd_diag20181, icd_diag20182, icd_diag20183, icd_diag20184,
+    icd_diag20191, icd_diag20192, icd_diag20193, icd_diag20194,
+    icd_diag20201, icd_diag20202, icd_diag20203, icd_diag20204)
+
+#icd_proc binding
+icd_proc<-bind_rows(
+    icd_proc20161, icd_proc20162, icd_proc20163, icd_proc20164,
+    icd_proc20171, icd_proc20172, icd_proc20173, icd_proc20174,
+    icd_proc20181, icd_proc20182, icd_proc20183, icd_proc20184,
+    icd_proc20191, icd_proc20192, icd_proc20193, icd_proc20194,
+    icd_proc20201, icd_proc20202, icd_proc20203, icd_proc20204)
+
+#demo binding and restricting to hospitals with data available through 2016-2020
+demo<-bind_rows(
+    demo20161, demo20162, demo20163, demo20164,
+    demo20171, demo20172, demo20173, demo20174,
+    demo20181, demo20182, demo20183, demo20184,
+    demo20191, demo20192, demo20193, demo20194,
+    demo20201, demo20202, demo20203, demo20204)
+
+#icu
+icu_lu<- bill_lu %>%
+  filter(STD_CHG_DESC %in% c("R&B ICU","R&B ICU COVID19","R&B ICU ISOLATION","R&B MICU (MEDICAL ICU) ISOLATION","R&B MICU (MEDICAL ICU)","R&B SICU  (SURGICAL ICU) ISOLATION","R&B SICU (SURGICAL ICU)","R&B BURN ICU","R&B TRAUMA ICU","R&B TRANSPLANT ICU","R&B CVICU","R&B CVICU ISOLATION","R&B CICU/CCU (CORONARY CARE)","R&B CICU/CCU ISOLATION (CORONARY CARE)","R&B CICU/CCU (CORONARY CARE)COVID19")) %>%
+  select(STD_CHG_CODE, STD_CHG_DESC)
+
+icu<-bind_rows(
+    bill20161 %>%
+      inner_join(icu_lu),
+    bill20162 %>%
+      inner_join(icu_lu),
+    bill20163 %>%
+      inner_join(icu_lu),
+    bill20164 %>%
+      inner_join(icu_lu),
+    bill20171 %>%
+      inner_join(icu_lu),
+    bill20172 %>%
+      inner_join(icu_lu),
+    bill20173 %>%
+      inner_join(icu_lu),
+    bill20174 %>%
+      inner_join(icu_lu),
+    bill20181 %>%
+      inner_join(icu_lu),
+    bill20182 %>%
+      inner_join(icu_lu),
+    bill20183 %>%
+      inner_join(icu_lu),
+    bill20184 %>%
+      inner_join(icu_lu),
+    bill20191 %>%
+      inner_join(icu_lu),
+    bill20192 %>%
+      inner_join(icu_lu),
+    bill20193 %>%
+      inner_join(icu_lu),
+    bill20194 %>%
+      inner_join(icu_lu),
+    bill20201 %>%
+      inner_join(icu_lu),
+    bill20202 %>%
+      inner_join(icu_lu),
+    bill20203 %>%
+      inner_join(icu_lu),
+    bill20204 %>%
+      inner_join(icu_lu)) %>%
+  group_by(PAT_KEY) %>%
+  arrange(SERV_DAY, .by_group = TRUE) %>%
+  mutate(day=SERV_DAY, icu=1, icutype=STD_CHG_DESC)
+
+icu_first_day<- icu %>%
+  group_by(PAT_KEY) %>%
+  arrange(day, .by_group = TRUE) %>%
+  slice(1L) %>%
+  mutate(icu_first_day=day)
+         
+icu_last_day<- icu %>%
+  group_by(PAT_KEY) %>%
+  arrange(desc(day), .by_group = TRUE) %>%
+  slice(1L) %>%
+  mutate(icu_last_day=day)
+
+icu1<- icu_first_day %>%
+  select(PAT_KEY, icu_first_day, icutype) %>%
+  left_join(icu_last_day %>%
+              select(PAT_KEY, icu_last_day))
+
+# sofa patients only
+#patients with sofa scores
+sofa_patients<-sofa %>%
+  group_by(PAT_KEY) %>%
+  slice(1L) %>%
+  mutate(sofa=1) %>%
+  dplyr::select(PAT_KEY, sofa)
+nrow(sofa_patients)
+
+icu2<-icu1 %>%
+  inner_join(sofa_patients)
+
+# unique adult patients with icu admission
+ds<- demo %>%
+  filter(AGE>=18 & year>=2016) %>%
+  mutate(count=1) %>%
+  inner_join(icu2) %>%
+  left_join(prov) %>%
+  left_join(physpec %>%
+                rename(ATTPHY_SPEC=PHY_SPEC)) %>%
+  group_by(MEDREC_KEY) %>%
+  slice(1L)
+```
+
+
+
+
+# hemoglobin
+```{r hemoglobin}
+set.seed(11182021)
+# lowest hgb per day within icu and not on first or last day of icu
+lowest_daily_hgb<- ds %>%
+  left_join(hgb) %>%
+  filter((hgb_day>icu_first_day & hgb_day<icu_last_day) & hgb_day<=28 & !is.na(hgb_day) & !is.na(hgb) & hgb>1 & hgb<20) %>%
+  group_by(PAT_KEY, hgb_day) %>%
+  summarise(hgb=min(hgb))
+
+# random lowest hgb
+ds1<- ds %>%
+  inner_join(lowest_daily_hgb) %>%
+  group_by(PAT_KEY) %>%
+  sample_n(1)
+
+```
+
+# charlson and removing patients with ami, chf and gi bleed on admission
+```{r remove ami and gi bleed}
+major_bleeding<-ds1 %>%
+  left_join(icd_diag %>%
+              mutate(icdcode=str_replace_all(ICD_CODE, "[[:punct:]]", "")) %>%
+              filter(ICD_POA=="Y")) %>%
+  filter(icdcode %in% c("I60", "I61", "I62","D62", "N02", "R31","R58", "S063","S064", "S065", "S066","I850", "K250", "K252", "K254","K256", "K260", "K262", "K264", "K266", "K270", "K272", "K274", "K276","K280", "K282", "K284", "K286", "K290", "K625", "K920", "K921", "K922","H113", "H356", "H431", "H450","H922", "J942", "K661", "M250", "N920", "N921", "N924", "N938", "N939","N950", "R040", "R041", "R042", "R048", "R049")) %>%
+  mutate(major_bleeding=1) %>%
+  group_by(PAT_KEY) %>%
+  summarise(major_bleeding=max(major_bleeding))
+
+char<-ds1 %>%
+  left_join(icd_diag %>%
+              mutate(icdcode=str_replace_all(ICD_CODE, "[[:punct:]]", "")) %>%
+              filter(ICD_POA=="Y")) 
+
+char1<- char %>%
+  filter(!is.na(icdcode)) %>%
+  as.data.frame() %>%
+  comorbidity(code="icdcode", id="PAT_KEY", score="charlson", assign0=T, icd="icd10")
+
+char2<-char1 %>% 
+  filter(ami==0) %>%
+  dplyr::select(PAT_KEY, charlson=score)
+
+ds_no_ami<- ds1 %>% inner_join(char2) %>%
+  left_join(major_bleeding) %>%
+  filter(is.na(major_bleeding))
+```
+
+
+# transfusion
+```{r transfusion}
+
+# icd code procedure based transfusion
+tx_proc<-icd_proc %>%
+  filter(ICD_CODE %in% c("30233N1","30243N1")) %>%
+  group_by(PAT_KEY, PROC_DAY) %>%
+  slice(1L) %>%
+  mutate(tx=1, tx_day=PROC_DAY) %>%
+  dplyr::select(PAT_KEY, tx, tx_day)
+
+# billing based transfusion
+tx_lu<- bill_lu %>%
+    filter(CLIN_DTL_DESC=="TRANSFUSION BLOOD/BLOOD COMPONENTS")
+
+tx20161<-bill20161 %>%  inner_join(tx_lu) %>% group_by(PAT_KEY, SERV_DAY) %>% slice(1L) %>% mutate(tx=1, tx_day=SERV_DAY) %>% dplyr::select(PAT_KEY,tx,tx_day)
+tx20162<-bill20162 %>%  inner_join(tx_lu) %>% group_by(PAT_KEY, SERV_DAY) %>% slice(1L) %>% mutate(tx=1, tx_day=SERV_DAY) %>% dplyr::select(PAT_KEY,tx,tx_day)
+tx20163<-bill20163 %>%  inner_join(tx_lu) %>% group_by(PAT_KEY, SERV_DAY) %>% slice(1L) %>% mutate(tx=1, tx_day=SERV_DAY) %>% dplyr::select(PAT_KEY,tx,tx_day)
+tx20164<-bill20164 %>%  inner_join(tx_lu) %>% group_by(PAT_KEY, SERV_DAY) %>% slice(1L) %>% mutate(tx=1, tx_day=SERV_DAY) %>% dplyr::select(PAT_KEY,tx,tx_day)
+
+tx20171<-bill20171 %>%  inner_join(tx_lu) %>% group_by(PAT_KEY, SERV_DAY) %>% slice(1L) %>% mutate(tx=1, tx_day=SERV_DAY) %>% dplyr::select(PAT_KEY,tx,tx_day)
+tx20172<-bill20172 %>%  inner_join(tx_lu) %>% group_by(PAT_KEY, SERV_DAY) %>% slice(1L) %>% mutate(tx=1, tx_day=SERV_DAY) %>% dplyr::select(PAT_KEY,tx,tx_day)
+tx20173<-bill20173 %>%  inner_join(tx_lu) %>% group_by(PAT_KEY, SERV_DAY) %>% slice(1L) %>% mutate(tx=1, tx_day=SERV_DAY) %>% dplyr::select(PAT_KEY,tx,tx_day)
+tx20174<-bill20174 %>%  inner_join(tx_lu) %>% group_by(PAT_KEY, SERV_DAY) %>% slice(1L) %>% mutate(tx=1, tx_day=SERV_DAY) %>% dplyr::select(PAT_KEY,tx,tx_day)
+
+tx20181<-bill20181 %>%  inner_join(tx_lu) %>% group_by(PAT_KEY, SERV_DAY) %>% slice(1L) %>% mutate(tx=1, tx_day=SERV_DAY) %>% dplyr::select(PAT_KEY,tx,tx_day)
+tx20182<-bill20182 %>%  inner_join(tx_lu) %>% group_by(PAT_KEY, SERV_DAY) %>% slice(1L) %>% mutate(tx=1, tx_day=SERV_DAY) %>% dplyr::select(PAT_KEY,tx,tx_day)
+tx20183<-bill20183 %>%  inner_join(tx_lu) %>% group_by(PAT_KEY, SERV_DAY) %>% slice(1L) %>% mutate(tx=1, tx_day=SERV_DAY) %>% dplyr::select(PAT_KEY,tx,tx_day)
+tx20184<-bill20184 %>%  inner_join(tx_lu) %>% group_by(PAT_KEY, SERV_DAY) %>% slice(1L) %>% mutate(tx=1, tx_day=SERV_DAY) %>% dplyr::select(PAT_KEY,tx,tx_day)
+
+tx20191<-bill20191 %>%  inner_join(tx_lu) %>% group_by(PAT_KEY, SERV_DAY) %>% slice(1L) %>% mutate(tx=1, tx_day=SERV_DAY) %>% dplyr::select(PAT_KEY,tx,tx_day)
+tx20192<-bill20192 %>%  inner_join(tx_lu) %>% group_by(PAT_KEY, SERV_DAY) %>% slice(1L) %>% mutate(tx=1, tx_day=SERV_DAY) %>% dplyr::select(PAT_KEY,tx,tx_day)
+tx20193<-bill20193 %>%  inner_join(tx_lu) %>% group_by(PAT_KEY, SERV_DAY) %>% slice(1L) %>% mutate(tx=1, tx_day=SERV_DAY) %>% dplyr::select(PAT_KEY,tx,tx_day)
+tx20194<-bill20194 %>%  inner_join(tx_lu) %>% group_by(PAT_KEY, SERV_DAY) %>% slice(1L) %>% mutate(tx=1, tx_day=SERV_DAY) %>% dplyr::select(PAT_KEY,tx,tx_day)
+
+tx20201<-bill20201 %>%  inner_join(tx_lu) %>% group_by(PAT_KEY, SERV_DAY) %>% slice(1L) %>% mutate(tx=1, tx_day=SERV_DAY) %>% dplyr::select(PAT_KEY,tx,tx_day)
+tx20202<-bill20202 %>%  inner_join(tx_lu) %>% group_by(PAT_KEY, SERV_DAY) %>% slice(1L) %>% mutate(tx=1, tx_day=SERV_DAY) %>% dplyr::select(PAT_KEY,tx,tx_day)
+tx20203<-bill20203 %>%  inner_join(tx_lu) %>% group_by(PAT_KEY, SERV_DAY) %>% slice(1L) %>% mutate(tx=1, tx_day=SERV_DAY) %>% dplyr::select(PAT_KEY,tx,tx_day)
+tx20204<-bill20204 %>%  inner_join(tx_lu) %>% group_by(PAT_KEY, SERV_DAY) %>% slice(1L) %>% mutate(tx=1, tx_day=SERV_DAY) %>% dplyr::select(PAT_KEY,tx,tx_day)
+
+tx_bill<-bind_rows(tx20161, tx20162, tx20163, tx20164, tx20171, tx20172, tx20173, tx20174, tx20181, tx20182, tx20183, tx20184, tx20191, tx20192, tx20193, tx20194, tx20201, tx20202, tx20203, tx20204)
+
+# combining transfusion tables
+tx<-tx_proc %>%
+  ungroup() %>%
+  dplyr::select(PAT_KEY, tx, tx_day) %>%
+  full_join(tx_bill %>%
+              ungroup() %>%
+              dplyr::select(PAT_KEY, tx, tx_day))
+
+# random hemoglobin
+ds2<-ds_no_ami %>%
+  ungroup() %>%
+  left_join(tx) %>%
+  filter((!is.na(tx_day) & hgb_day==tx_day)) %>%
+  group_by(PAT_KEY) %>%
+  slice(1L) %>%
+  dplyr::select(PAT_KEY, tx_day, tx) %>%
+  right_join(ds_no_ami) %>%
+  mutate(tx=if_else(!is.na(tx),1,0))
+
+ds2a<-ds2 %>%
+  ungroup() %>%
+  left_join(tx %>% rename(tx_co=tx, tx_co_day=tx_day)) %>%
+  filter((!is.na(tx_co_day) & hgb_day-1==tx_co_day)) %>%
+  group_by(PAT_KEY) %>%
+  slice(1L) %>%
+  dplyr::select(PAT_KEY, tx_co_day, tx_co) %>%
+  right_join(ds2) %>%
+  mutate(tx_co=if_else(!is.na(tx_co),1,0))
+
+```
+
+# adding sofa score
+```{r sofa score}
+## adding sofa outcome (random)
+ds3<-ds2a %>%
+  left_join(sofa1) %>%
+  filter(day>hgb_day & day<=hgb_day+3 & !is.na(day)) %>%
+  group_by(PAT_KEY) %>%
+  arrange(desc(daily_sofa), .by_group = TRUE) %>%
+  slice(1L) %>%
+  rename(msofa_out=daily_sofa, msofa_out_day=day) %>%
+  dplyr::select(PAT_KEY, msofa_out, msofa_out_day, cardiovascular, respiratory, nervous, liver, kidneys, coagulation) %>%
+  right_join(ds2a)
+
+# adding in modification for death
+ds3$msofa_out[ds3$DISC_STATUS==20 & ds3$LOS>ds3$hgb_day & ds3$LOS<=ds3$hgb_day+2]<-25
+
+ds3$msofa_out[is.na(ds3$msofa_out)]<-0
+
+ds3<-ds3 %>%filter(!is.na(msofa_out))
+
+
+## adding in sofa covariable
+ds4<-ds3 %>%
+  left_join(sofa1 %>%
+              dplyr::select(PAT_KEY, daily_sofa, day)) %>%
+  filter(day==hgb_day & !is.na(day)) %>%
+  group_by(PAT_KEY) %>%
+  arrange(desc(daily_sofa), .by_group = TRUE) %>%
+  slice(1L) %>%
+  rename(sofa_co=daily_sofa) %>%
+  dplyr::select(PAT_KEY, sofa_co) %>%
+  right_join(ds3)
+
+ds4$sofa_co[is.na(ds4$sofa_co)]<-0
+```
+
+# hgb out
+```{r hgbout}
+lowest_daily_hgb_out<- lowest_daily_hgb %>%
+  rename(hgb_out=hgb, hgb_out_day=hgb_day)
+
+ds5<-ds4 %>%
+  left_join(lowest_daily_hgb_out) %>%
+  filter((hgb_out_day>hgb_day & hgb_out_day<=hgb_day+2 & !is.na(hgb_out_day)) | is.na(hgb_out_day)) %>%
+  group_by(PAT_KEY) %>%
+  arrange(hgb_out_day, .by_group = T) %>%
+  slice(1L) %>%
+  dplyr::select(PAT_KEY, hgb_out_day, hgb_out) %>%
+  right_join(ds4)
+
+```
+
+
+# adding in vasopressors status
+```{r vasopressorstatus}
+# covariable
+ds6<-ds5 %>%
+  left_join(sofa1 %>%
+              mutate(press_co=if_else(!is.na(cardiovascular) & cardiovascular>0,1,0), press_co_day=day) %>%
+              dplyr::select(PAT_KEY, press_co, press_co_day)) %>%
+  filter(press_co_day==hgb_day | is.na(press_co_day)) %>%
+  group_by(PAT_KEY) %>%
+  arrange(desc(press_co), .by_group = T) %>%
+  slice(1L) %>%
+  dplyr::select(PAT_KEY, press_co) %>%
+  right_join(ds5)
+
+ds6$press_co[is.na(ds6$press_co)]<-0
+
+
+# outcome
+ds7<-ds6 %>%
+  left_join(sofa1 %>%
+              mutate(press_out=if_else(!is.na(cardiovascular) & cardiovascular>0,1,0), press_out_day=day) %>%
+              dplyr::select(PAT_KEY, press_out, press_out_day)) %>%
+  filter((press_out_day>hgb_day & press_out_day<=hgb_day+2) | is.na(press_out_day)) %>%
+  group_by(PAT_KEY) %>%
+  arrange(desc(press_out), .by_group = T) %>%
+  slice(1L) %>%
+  dplyr::select(PAT_KEY, press_out, press_out_day) %>%
+  right_join(ds6)
+
+ds7$press_out[is.na(ds7$press_out)]<-0
+
+```
+
+
+# adding in mechanical ventilation status
+```{r mvstatus}
+mv_lu<- bill_lu %>%
+    filter((STD_CHG_CODE=="270270013950000" | STD_CHG_CODE=="270270057050000" | STD_CHG_CODE=="270270086600000" | STD_CHG_CODE=="270270088900000" | STD_CHG_CODE=="270270089300000" | STD_CHG_CODE=="290290093620000" | STD_CHG_CODE=="410412946560000" | STD_CHG_CODE=="410412946560001" | STD_CHG_CODE=="410412946570000" | STD_CHG_CODE=="410412946570004" | STD_CHG_CODE=="410412946570005"  | STD_CHG_CODE=="410412946570007" | STD_CHG_CODE=="410412946570009"  | STD_CHG_CODE=="970976946560000" |  STD_CHG_CODE=="970976946570000") | (STD_CHG_CODE=="270270013920000" | STD_CHG_CODE=="270270086700000" | STD_CHG_CODE=="270270106380000" | STD_CHG_CODE=="270270106390000" | STD_CHG_CODE=="270270106400000" | STD_CHG_CODE=="270270990130000" | STD_CHG_CODE=="410412000060000" | STD_CHG_CODE=="410412000070000" | STD_CHG_CODE=="410412000080000" | STD_CHG_CODE=="410412000090000" | STD_CHG_CODE=="270270032500000" | STD_CHG_CODE=="270270087800000" | STD_CHG_CODE=="410412946600000" | STD_CHG_CODE=="410412946600001" | STD_CHG_CODE=="410412946600003" | STD_CHG_CODE=="410412946600004" | STD_CHG_CODE=="410412946600005" | STD_CHG_CODE=="410412946600007" | STD_CHG_CODE=="410412946600008" | STD_CHG_CODE=="410412946600009")) %>%
+  mutate(mv2=1) # because mv is already named in sofa outcome
+
+mv<-bind_rows(
+    bill20161 %>%
+      inner_join(mv_lu),
+    bill20162 %>%
+      inner_join(mv_lu),
+    bill20163 %>%
+      inner_join(mv_lu),
+    bill20164 %>%
+      inner_join(mv_lu),
+    bill20171 %>%
+      inner_join(mv_lu),
+    bill20172 %>%
+      inner_join(mv_lu),
+    bill20173 %>%
+      inner_join(mv_lu),
+    bill20174 %>%
+      inner_join(mv_lu),
+    bill20181 %>%
+      inner_join(mv_lu),
+    bill20182 %>%
+      inner_join(mv_lu),
+    bill20183 %>%
+      inner_join(mv_lu),
+    bill20184 %>%
+      inner_join(mv_lu),
+    bill20191 %>%
+      inner_join(mv_lu),
+    bill20192 %>%
+      inner_join(mv_lu),
+    bill20193 %>%
+      inner_join(mv_lu),
+    bill20194 %>%
+      inner_join(mv_lu),
+    bill20201 %>%
+      inner_join(mv_lu),
+    bill20202 %>%
+      inner_join(mv_lu),
+    bill20203 %>%
+      inner_join(mv_lu),
+    bill20204 %>%
+      inner_join(mv_lu)) %>%
+  rename(mv_day=SERV_DAY) %>%
+  dplyr::select(PAT_KEY, mv_day, mv2)
+
+
+# covariable
+ds8<-ds7 %>%
+  left_join(mv) %>%
+  filter(mv_day==hgb_day | is.na(mv_day)) %>%
+  group_by(PAT_KEY) %>%
+  arrange(desc(mv2), .by_group = T) %>%
+  slice(1L) %>%
+  rename(mv_co=mv2, mv_co_day=mv_day)%>%
+  mutate(mv_co=if_else(!is.na(mv_co),1,0)) %>%
+  ungroup() %>%
+  dplyr::select(PAT_KEY, mv_co, mv_co_day) %>%
+  right_join(ds7)
+
+ds8$mv_co[is.na(ds8$mv_co)]<-0
+
+# outcome
+ds9<-ds8 %>%
+  left_join(mv) %>%
+  filter((mv_day>hgb_day & mv_day<=hgb_day+2 & !is.na(mv_day))| is.na(mv_day)) %>%
+  group_by(PAT_KEY) %>%
+  arrange(desc(mv2), .by_group = T) %>%
+  slice(1L) %>%
+  rename(mv_out=mv2, mv_out_day=mv_day) %>%
+  mutate(mv_out=if_else(!is.na(mv_out),1,0)) %>%
+  ungroup() %>%
+  dplyr::select(PAT_KEY, mv_out, mv_out_day) %>%
+  right_join(ds8)
+
+ds9$mv_out[is.na(ds9$mv_out)]<-0
+```
+
+
+
+
+# converint variables to 1 and 0s
+```{r converting}
+q<- ds9
+
+q$sofa_co[is.na(q$sofa_co)]<-0
+q$mv_co[is.na(q$mv_co)]<-0
+q$press_co[is.na(q$press_co)]<-0
+q$mv_out[is.na(q$mv_out)]<-0
+q$press_out[is.na(q$press_out)]<-0
+q$cardiovascular[is.na(q$cardiovascular)]<-0
+q$respiratory[is.na(q$respiratory)]<-0
+q$nervous[is.na(q$nervous)]<-0
+q$liver[is.na(q$liver)]<-0
+q$coagulation[is.na(q$coagulation)]<-0
+q$kidneys[is.na(q$kidneys)]<-0
+q$death<-0
+q$death[q$DISC_STATUS==20]<-1
+q$sex<-0
+q$sex[q$GENDER=="F"]<-1
+q$tx_co[is.na(q$tx_co)]<-0
+```
+
+
+# write dataset
+```{r dataset}
+write.csv(q, "hgb_icu_random_both_tx_only_12012021.csv", row.names=F)
+```
+
+
+#read dataset
+```{r datasetread}
+q<-fread("hgb_icu_random_both_tx_only_12012021.csv", sep=",")
+```
+
+
+
+# limiting to hospitals that have discontinuity of at least 0% at threshold (which also means at least one patient with a hgb of 6.9) and adding sepsis and cardiovascular icu status
+```{r hospital that use procedure code}
+# cardiac icu
+q<- q %>%
+  mutate(cardiac_icu=if_else(icutype %in% c("R&B CICU/CCU (CORONARY CARE)", "R&B CICU/CCU ISOLATION (CORONARY CARE)", "R&B CVICU", "R&B CVICU ISOLATION"),1,0))
+
+# sepsis
+angus_lu <- icd_lu %>%
+  mutate(cardiovascular_angus=if_else(ICD_CODE %in% c("R57.9","R57.0","R65.21","R57.1","R57.8","I95.1","I95.2","I95.3","I95.81","I95.89","I95.9"),1,0),
+         respiratory_angus=if_else(ICD_CODE %in% c("5A1935Z","5A1945Z","5A1955Z"),1,0),
+         neurologic_angus=if_else(ICD_CODE %in% c("G93.40","G93.41","G93.49","I67.83","F05","F06.2","F06.0","F06.30","F06.31","F06.32","F06.33","F06.34","F06.4","F06.1","F53","F06.8","G93.1"),1,0),
+         hematologic_angus=if_else(ICD_CODE %in% c("D69.59","D69.51","D69.6","D65","D68.8","D68.9"),1,0),
+         hepatic_angus=if_else(ICD_CODE %in% c("K72.00","K72.01","K76.2","K76.3"),1,0),
+         renal_angus=if_else(ICD_CODE %in% c("N17.0","N17.1","N17.2","N17.8","N17.9"),1,0)) %>%
+  filter(cardiovascular_angus==1|respiratory_angus==1|neurologic_angus==1|hematologic_angus==1|hepatic_angus==1|renal_angus==1)
+
+angus_diag<- icd_diag %>%
+  inner_join(angus_lu) %>%
+  mutate(poa=if_else(ICD_POA=="Y",1,0)) %>%
+  dplyr::select(PAT_KEY, poa, cardiovascular_angus, respiratory_angus, neurologic_angus, hematologic_angus, hepatic_angus, renal_angus)
+
+angus_proc<- icd_proc %>%
+  inner_join(angus_lu) %>%
+  mutate(poa=if_else(PROC_DAY %in% c(1),1,0)) %>%
+  dplyr::select(PAT_KEY, poa, cardiovascular_angus, respiratory_angus, neurologic_angus, hematologic_angus, hepatic_angus, renal_angus)
+
+angus_poa<-angus_diag %>%
+  full_join(angus_proc) %>%
+  filter(poa==1) %>%  
+  group_by(PAT_KEY) %>%
+  summarise(cardiovascular_angus_poa=max(cardiovascular_angus), respiratory_angus_poa=max(respiratory_angus), neurologic_angus_poa=max(neurologic_angus), hematologic_angus_poa=max(hematologic_angus), hepatic_angus_poa=max(hepatic_angus), renal_angus_poa=max(renal_angus)) %>%
+  mutate(organ_dysfunction=1)
+
+infection_code<-c("A000", "A001", "A009", "A0100", "A0101", "A0102", "A0103", "A0104", "A0105", "A0109", "A011", "A012", "A013", "A014", "A020", "A021", "A0220", "A0221", "A0222", "A0223", "A0224", "A0225", "A0229", "A028", "A029", "A030", "A031", "A032", "A033", "A038", "A039", "A040", "A041", "A042", "A043", "A044", "A045", "A046", "A047", "A048", "A049", "A050", "A051", "A052", "A053", "A054", "A055", "A058", "A059", "A080", "A0811", "A0819", "A082", "A0831", "A0832", "A0839", "A084", "A088", "A09", "A150", "A154", "A155", "A156", "A157", "A158", "A159", "A170", "A171", "A1781", "A1782", "A1783", "A1789", "A179", "A1801", "A1802", "A1803", "A1809", "A1810", "A1811", "A1812", "A1813", "A1814", "A1815", "A1816", "A1817", "A1818", "A182", "A1831", "A1832", "A1839", "A184", "A1850", "A1851", "A1852", "A1853", "A1854", "A1859", "A186", "A187", "A1881", "A1882", "A1883", "A1884", "A1885", "A1889", "A190", "A191", "A192", "A198", "A199", "A200", "A201", "A202", "A203", "A207", "A208", "A209", "A210", "A211", "A212", "A213", "A217", "A218", "A219", "A220", "A221", "A222", "A227", "A228", "A229", "A230", "A231", "A232", "A233", "A238", "A239", "A240", "A241", "A243", "A249", "A250", "A251", "A259", "A260", "A267", "A268", "A269", "A270", "A2781", "A2789", "A279", "A280", "A282", "A288", "A289", "A300", "A301", "A302", "A303", "A304", "A305", "A308", "A309", "A310", "A311", "A312", "A318", "A319", "A320", "A3211", "A3212", "A327", "A3281", "A3282", "A3289", "A329", "A35", "A360", "A361", "A362", "A363", "A3681", "A3682", "A3683", "A3684", "A3685", "A3686", "A3689", "A369", "A3700", "A3701", "A3710", "A3711", "A3780", "A3781", "A3790", "A3791", "A380", "A381", "A388", "A389", "A390", "A391", "A392", "A394", "A3950", "A3951", "A3952", "A3953", "A3981", "A3982", "A3983", "A3984", "A3989", "A399", "A400", "A401", "A403", "A408", "A409", "A4101", "A4102", "A411", "A412", "A413", "A414", "A4150", "A4151", "A4152", "A4153", "A4159", "A4181", "A4189", "A419", "A420", "A421", "A422", "A427", "A4281", "A4282", "A4289", "A429", "A430", "A431", "A438", "A439", "A46", "A480", "A481", "A482", "A483", "A484", "A4851", "A4852", "A488", "A4901", "A4902", "A491", "A492", "A493", "A498", "A499", "A5001", "A5002", "A5003", "A5004", "A5005", "A5006", "A5007", "A5008", "A5009", "A501", "A502", "A5030", "A5031", "A5032", "A5039", "A5040", "A5041", "A5042", "A5043", "A5044", "A5045", "A5049", "A5051", "A5052", "A5053", "A5054", "A5055", "A5056", "A5057", "A5059", "A506", "A507", "A509", "A510", "A511", "A512", "A5131", "A5132", "A5139", "A5141", "A5142", "A5143", "A5144", "A5145", "A5146", "A5149", "A515", "A519", "A5200", "A5201", "A5202", "A5203", "A5204", "A5205", "A5206", "A5209", "A5210", "A5211", "A5212", "A5213", "A5214", "A5215", "A5216", "A5217", "A5219", "A522", "A523", "A5271", "A5272", "A5273", "A5274", "A5275", "A5276", "A5277", "A5278", "A5279", "A528", "A529", "A530", "A539", "A5400", "A5401", "A5402", "A5403", "A5409", "A541", "A5421", "A5422", "A5423", "A5424", "A5429", "A5430", "A5431", "A5432", "A5433", "A5439", "A5440", "A5441", "A5442", "A5443", "A5449", "A545", "A546", "A5481", "A5482", "A5483", "A5484", "A5485", "A5486", "A5489", "A549", "A5602", "A5611", "A65", "A660", "A661", "A662", "A663", "A664", "A665", "A666", "A667", "A668", "A669", "A670", "A671", "A672", "A673", "A679", "A690", "A691", "A698", "A699", "B350", "B351", "B352", "B353", "B354", "B355", "B356", "B358", "B359", "B360", "B361", "B362", "B363", "B368", "B369", "B370", "B371", "B372", "B373", "B3741", "B3742", "B3749", "B375", "B376", "B377", "B3781", "B3782", "B3783", "B3784", "B3789", "B379", "B380", "B382", "B383", "B384", "B387", "B3881", "B3889", "B389", "B390", "B392", "B393", "B394", "B395", "B399", "B400", "B402", "B403", "B407", "B4081", "B4089", "B409", "B410", "B417", "B418", "B419", "B420", "B421", "B427", "B4281", "B4282", "B4289", "B429", "B430", "B431", "B432", "B438", "B439", "B440", "B441", "B442", "B447", "B4489", "B449", "B450", "B451", "B452")
+
+infection_code1<-c("B453", "B457", "B458", "B459", "B460", "B461", "B462", "B463", "B464", "B465", "B468", "B469", "B470", "B471", "B479", "B480", "B481", "B482", "B483", "B484", "B488", "B49", "B781", "B950", "B951", "B952", "B953", "B954", "B955", "B9561", "B9562", "B957", "B958", "B960", "B961", "B9620", "B9621", "B9622", "B9623", "B9629", "B963", "B964", "B965", "B966", "B967", "B9681", "B9682", "B9689", "E832", "G000", "G001", "G002", "G003", "G008", "G009", "G01", "G02", "G030", "G038", "G039", "G042", "G060", "G061", "G062", "G07", "G08", "H32", "I300", "I301", "I308", "I309", "I32", "I330", "I339", "I39", "I8000", "I8001", "I8002", "I8003", "I8010", "I8011", "I8012", "I8013", "I80201", "I80202", "I80203", "I80209", "I80211", "I80212", "I80213", "I80219", "I80221", "I80222", "I80223", "I80229", "I80231", "I80232", "I80233", "I80239", "I80291", "I80292", "I80293", "I80299", "I803", "I808", "I809", "J0100", "J0101", "J0110", "J0111", "J0120", "J0121", "J0130", "J0131", "J0140", "J0141", "J0180", "J0181", "J0190", "J0191", "J020", "J028", "J029", "J0300", "J0301", "J0380", "J0381", "J0390", "J0391", "J040", "J0410", "J0411", "J042", "J0430", "J0431", "J050", "J0510", "J0511", "J060", "J069", "J13", "J14", "J150", "J151", "J1520", "J15211", "J15212", "J1529", "J153", "J154", "J155", "J156", "J158", "J159", "J17", "J180", "J181", "J188", "J189", "J200", "J201", "J202", "J441", "J470", "J471", "J479", "J850", "J851", "J852", "J853", "J860", "J869", "K122", "K352", "K353", "K3580", "K3589", "K36", "K37", "K50014", "K50114", "K50814", "K50914", "K51414", "K51514", "K51814", "K51914", "K5700", "K5701", "K5712", "K5713", "K5720", "K5721", "K5732")
+
+infection_code2<- c("K5733", "K5740", "K5741", "K5752", "K5753", "K5780", "K5781", "K5792", "K5793", "K610", "K611", "K612", "K613", "K614", "K630", "K631", "K650", "K651", "K652", "K653", "K654", "K658", "K659", "K67", "K6811", "K6812", "K6819", "K689", "K750", "K751", "K810", "K9081", "L0201", "L0211", "L02211", "L02212", "L02213", "L02214", "L02215", "L02216", "L02219", "L0231", "L02411", "L02412", "L02413", "L02414", "L02415", "L02416", "L02419", "L02511", "L02512", "L02519", "L02611", "L02612", "L02619", "L02811", "L02818", "L0291", "L03011", "L03012", "L03019", "L03021", "L03022", "L03029", "L03031", "L03032", "L03039", "L03041", "L03042", "L03049", "L03111", "L03112", "L03113", "L03114", "L03115", "L03116", "L03119", "L03121", "L03122", "L03123", "L03124", "L03125", "L03126", "L03129", "L03211", "L03212", "L03221", "L03222", "L03311", "L03312", "L03313", "L03314", "L03315", "L03316", "L03317", "L03319", "L03321", "L03322", "L03323", "L03324", "L03325", "L03326", "L03327", "L03329", "L03811", "L03818", "L03891", "L03898", "L0390", "L0391", "L040", "L041", "L042", "L043", "L048", "L049", "L080", "L081", "L0881", "L0882", "L0889", "L089", "L88", "L928", "L980", "L983", "M0000", "M00011", "M00012", "M00019", "M00021", "M00022", "M00029", "M00031", "M00032", "M00039", "M00041", "M00042", "M00049", "M00051", "M00052", "M00059", "M00061", "M00062", "M00069", "M00071", "M00072", "M00079", "M0008", "M0009", "M0010", "M00111", "M00112", "M00119", "M00121", "M00122", "M00129", "M00131", "M00132", "M00139", "M00141", "M00142", "M00149", "M00151", "M00152", "M00159", "M00161", "M00162", "M00169", "M00171", "M00172", "M00179", "M0018", "M0019", "M0020", "M00211", "M00212", "M00219", "M00221", "M00222", "M00229", "M00231", "M00232", "M00239", "M00241", "M00242", "M00249", "M00251", "M00252", "M00259", "M00261", "M00262", "M00269", "M00271", "M00272", "M00279", "M0028", "M0029", "M0080", "M00811", "M00812", "M00819", "M00821", "M00822", "M00829", "M00831", "M00832", "M00839", "M00841", "M00842", "M00849", "M00851", "M00852", "M00859", "M00861", "M00862", "M00869", "M00871", "M00872", "M00879", "M0088", "M0089", "M009", "M3212", "M4620", "M4621", "M4622", "M4623", "M4624")
+
+infection_code3<-c("M4625", "M4626", "M4627", "M4628", "M4630", "M4631", "M4632", "M4633", "M4634", "M4635", "M4636", "M4637", "M4638", "M4639", "M60009", "M8600", "M86011", "M86012", "M86019", "M86021", "M86022", "M86029", "M86031", "M86032", "M86039", "M86041", "M86042", "M86049", "M86051", "M86052", "M86059", "M86061", "M86062", "M86069", "M86071", "M86072", "M86079", "M8608", "M8609", "M8610", "M86111", "M86112", "M86119", "M86121", "M86122", "M86129", "M86131", "M86132", "M86139", "M86141", "M86142", "M86149", "M86151", "M86152", "M86159", "M86161", "M86162", "M86169", "M86171", "M86172", "M86179", "M8618", "M8619", "M8620", "M86211", "M86212", "M86219", "M86221", "M86222", "M86229", "M86231", "M86232", "M86239", "M86241", "M86242", "M86249", "M86251", "M86252", "M86259", "M86261", "M86262", "M86269", "M86271", "M86272", "M86279", "M8628", "M8629", "M868X0", "M868X1", "M868X2", "M868X3", "M868X4", "M868X5", "M868X6", "M868X7", "M868X8", "M868X9", "M869", "M8960", "M89611", "M89612", "M89619", "M89621", "M89622", "M89629", "M89631", "M89632", "M89639", "M89641", "M89642", "M89649", "M89651", "M89652", "M89659", "M89661", "M89662", "M89669", "M89671", "M89672", "M89679", "M8968", "M8969", "M9080", "M90811", "M90812", "M90819", "M90821", "M90822", "M90829", "M90831", "M90832", "M90839", "M90841", "M90842", "M90849", "M90851", "M90852", "M90859", "M90861", "M90862", "M90869", "M90871", "M90872", "M90879", "M9088", "M9089", "N10", "N12", "N136", "N151", "N159", "N16", "N2884", "N2885", "N2886", "N340", "N341", "N342", "N343", "N390", "N410", "N412", "N413", "N414", "N418", "N419", "N51", "N7001", "N7002", "N7003", "N7091", "N7092", "N7093", "N710", "N719", "N72", "N730", "N732", "N733", "N735", "N736", "N738", "N739", "N74", "N750", "N751", "N758", "N759", "N760", "N762", "N763", "N764", "N765", "N766", "N7681", "N7689", "N770", "N771", "N980", "R7881", "T80211A", "T80212A", "T80218A", "T80219A", "T8022XA", "T8029XA", "T814XXA", "T826XXA", "T827XXA", "T8351XA", "T8359XA", "T836XXA", "T8450XA", "T8451XA", "T8452XA", "T8453XA", "T8454XA", "T8459XA", "T8460XA", "T84610A", "T84611A", "T84612A", "T84613A", "T84614A", "T84615A", "T84619A", "T84620A", "T84621A", "T84622A", "T84623A", "T84624A", "T84625A", "T84629A", "T8463XA", "T8469XA", "T847XXA", "T8571XA", "T8572XA", "T8579XA", "T86842", "T880XXA")
+
+infection<-icd_diag %>%
+  filter(ICD_POA=="Y") %>%
+  mutate(icdcode=str_replace_all(ICD_CODE, "[[:punct:]]", "")) %>%
+  filter(icdcode %in% infection_code | icdcode %in% infection_code1 | icdcode %in% infection_code2 | icdcode %in% infection_code3) %>%
+  mutate(infection=1) %>%
+  group_by(PAT_KEY) %>%
+  summarise(infection=max(infection))
+
+sepsis<-angus_poa %>%
+  dplyr::select(PAT_KEY, organ_dysfunction)%>%
+  inner_join(infection) %>%
+  mutate(sep=1)
+  
+q<- q %>%
+  left_join(sepsis %>%
+              dplyr::select(PAT_KEY, sep))
+q$sep[is.na(q$sep)]<-0
+
+# hospitals with discontinuity
+q1<-q %>%
+  mutate(count=1) %>%
+  group_by(PROV_ID, hgb) %>%
+  summarise(count=sum(count), tx=sum(tx)) %>%
+  mutate(prop_tx=tx/count) %>%
+  filter(hgb>=6.9 & hgb<=7.0) %>%
+  group_by(PROV_ID) %>%
+  mutate(lead_prop_tx=lead(prop_tx)) %>%
+  filter(!is.na(lead_prop_tx)) %>%
+  mutate(discontinuity=prop_tx-lead_prop_tx) %>%
+  filter(discontinuity>0.0) %>%
+  dplyr::select(PROV_ID, discontinuity) %>%
+  left_join(q)
+
+write.csv(q1, "hgb_icu_random_both_tx_only_with_sep_cardiac_icu_12012021.csv", row.names=F)
+q1<-fread("hgb_icu_random_both_tx_only_with_sep_cardiac_icu_12012021.csv", sep=",")
+```
+
+# mimic read in 
+```{r mimic read-in}
+m1<-read.csv("ml_12012021.csv")
+m1<- m1 %>%
+  rename(AGE=age, sex=female, mv_co=imv_co, tx_co=prbc_co, tx=prbc_ex, mv_out=imv_out, death=death_out)
+
+summary(m1$hgb)
+
+```
+
+# table 1 mimic
+```{r table 1 mimic}
+summary(m1$AGE)
+summary(factor(m1$sex))
+summary(m1$sex)
+summary(m1$sofa_co)
+summary(m1$charlson)
+summary(factor(m1$mv_co))
+summary(m1$mv_co)
+summary(factor(m1$press_co))
+summary(m1$press_co)
+summary(factor(m1$tx_co))
+summary(m1$tx_co)
+
+sd(m1$msofa_out)
+```
+
+
+# mimic rd
+```{r mimic rd}
+mod_age<-rdrobust(x=m1$hgb, y=m1$AGE, c=7, bwselect="msetwo", all=T)
+mod_sex<-rdrobust(x=m1$hgb, y=m1$sex, c=7, bwselect="msetwo", all=T)
+mod_sofa_co<-rdrobust(x=m1$hgb, y=m1$sofa_co, c=7, bwselect="msetwo", all=T)
+mod_char<-rdrobust(x=m1$hgb, y=m1$charlson, c=7, bwselect="msetwo", all=T)
+mod_mv_co<-rdrobust(x=m1$hgb, y=m1$mv_co, c=7, bwselect="msetwo", all=T)
+mod_press_co<-rdrobust(x=m1$hgb, y=m1$press_co, c=7, bwselect="msetwo", all=T)
+mod_tx_co<-rdrobust(x=m1$hgb, y=m1$tx_co, c=7, bwselect="msetwo", all=T)
+mod_tx<-rdrobust(x=m1$hgb, y=m1$tx, c=7, bwselect="msetwo", all=T)
+
+summary(mod_age)
+summary(mod_sex)
+summary(mod_sofa_co)
+summary(mod_char)
+summary(mod_mv_co)
+summary(mod_press_co)
+summary(mod_tx_co)
+summary(mod_tx)
+
+# main outcome
+mod_sofa_fuzzy<-rdrobust(x=m1$hgb, y=m1$msofa_out, fuzzy=m1$tx, c=7, bwselect="msetwo", all=T, covs=c(m1$AGE+m1$sex+m1$charlson+m1$sofa_co+m1$mv_co+m1$press_co+m1$tx_co))
+mod_sofa<-rdrobust(x=m1$hgb, y=m1$msofa_out, c=7, bwselect="msetwo", all=T, covs=c(m1$AGE+m1$sex+m1$charlson+m1$sofa_co+m1$mv_co+m1$press_co+m1$tx_co))
+summary(mod_sofa_fuzzy)
+summary(mod_sofa)
+
+# hgb
+mod_hgb_fuzzy<-rdrobust(x=m1$hgb, y=m1$hgb_out, fuzzy=m1$tx, c=7, bwselect="msetwo", all=T, covs=c(m1$AGE+m1$sex+m1$charlson+m1$sofa_co+m1$mv_co+m1$press_co+m1$tx_co))
+mod_hgb<-rdrobust(x=m1$hgb, y=m1$hgb_out, c=7, bwselect="msetwo", all=T, covs=c(m1$AGE+m1$sex+m1$charlson+m1$sofa_co+m1$mv_co+m1$press_co+m1$tx_co))
+summary(mod_hgb_fuzzy)
+summary(mod_hgb)
+
+# imv
+mod_imv_fuzzy<-rdrobust(x=m1$hgb, y=m1$mv_out, fuzzy=m1$tx, c=7, bwselect="msetwo", all=T, covs=c(m1$AGE+m1$sex+m1$charlson+m1$sofa_co+m1$mv_co+m1$press_co+m1$tx_co))
+mod_imv<-rdrobust(x=m1$hgb, y=m1$mv_out, c=7, bwselect="msetwo", all=T, covs=c(m1$AGE+m1$sex+m1$charlson+m1$sofa_co+m1$mv_co+m1$press_co+m1$tx_co))
+summary(mod_imv_fuzzy)
+summary(mod_imv)
+
+# vasopressors
+mod_press_fuzzy<-rdrobust(x=m1$hgb, y=m1$press_out, fuzzy=m1$tx, c=7, bwselect="msetwo", all=T, covs=c(m1$AGE+m1$sex+m1$charlson+m1$sofa_co+m1$mv_co+m1$press_co+m1$tx_co))
+mod_press<-rdrobust(x=m1$hgb, y=m1$press_out, c=7, bwselect="msetwo", all=T, covs=c(m1$AGE+m1$sex+m1$charlson+m1$sofa_co+m1$mv_co+m1$press_co+m1$tx_co))
+summary(mod_press_fuzzy)
+summary(mod_press)
+
+# death
+mod_death_fuzzy<-rdrobust(x=m1$hgb, y=m1$death, fuzzy=m1$tx, c=7, bwselect="msetwo", all=T, covs=c(m1$AGE+m1$sex+m1$charlson+m1$sofa_co+m1$mv_co+m1$press_co+m1$tx_co))
+mod_death<-rdrobust(x=m1$hgb, y=m1$death, c=7, bwselect="msetwo", all=T, covs=c(m1$AGE+m1$sex+m1$charlson+m1$sofa_co+m1$mv_co+m1$press_co+m1$tx_co))
+summary(mod_death_fuzzy)
+summary(mod_death)
+
+# sensitivity analyses
+# half bandwidth
+mod_sofa_fuzzy_hb<-rdrobust(x=m1$hgb, y=m1$msofa_out, fuzzy=m1$tx, c=7, h=mod_sofa_fuzzy$bws[1,]/2, b=mod_sofa_fuzzy$bws[2,], all=T, covs=c(m1$AGE+m1$sex+m1$charlson+m1$sofa_co+m1$mv_co+m1$press_co+m1$tx_co))
+summary(mod_sofa_fuzzy_hb)
+
+# double bandwidth
+mod_sofa_fuzzy_db<-rdrobust(x=m1$hgb, y=m1$msofa_out, fuzzy=m1$tx, c=7, h=mod_sofa_fuzzy$bws[1,]*2, b=mod_sofa_fuzzy$bws[2,], all=T, covs=c(m1$AGE+m1$sex+m1$charlson+m1$sofa_co+m1$mv_co+m1$press_co+m1$tx_co))
+summary(mod_sofa_fuzzy_db)
+
+# symmetric bandwidth
+mod_sofa_fuzzy_sb<-rdrobust(x=m1$hgb, y=m1$msofa_out, fuzzy=m1$tx, c=7, bwselect="mserd", all=T, covs=c(m1$AGE+m1$sex+m1$charlson+m1$sofa_co+m1$mv_co+m1$press_co+m1$tx_co))
+summary(mod_sofa_fuzzy_sb)
+
+# local quadratic
+mod_sofa_fuzzy_lq<-rdrobust(x=m1$hgb, y=m1$msofa_out, fuzzy=m1$tx, c=7, bwselect="msetwo", all=T, covs=c(m1$AGE+m1$sex+m1$charlson+m1$sofa_co+m1$mv_co+m1$press_co+m1$tx_co), p=2)
+summary(mod_sofa_fuzzy_lq)
+
+# global 3rd order polynomial
+mod_sofa_fuzzy_gp3<-rdrobust(x=m1$hgb, y=m1$msofa_out, fuzzy=m1$tx, c=7, h=c(7-min(m1$hgb), max(m1$hgb)-7), all=T, covs=c(m1$AGE+m1$sex+m1$charlson+m1$sofa_co+m1$mv_co+m1$press_co+m1$tx_co), p=3, kernel="uniform")
+summary(mod_sofa_fuzzy_gp3)
+
+# global 4th order polynomial
+mod_sofa_fuzzy_gp4<-rdrobust(x=m1$hgb, y=m1$msofa_out, fuzzy=m1$tx, c=7, h=c(7-min(m1$hgb), max(m1$hgb)-7), all=T, covs=c(m1$AGE+m1$sex+m1$charlson+m1$sofa_co+m1$mv_co+m1$press_co+m1$tx_co), p=4, kernel="uniform")
+summary(mod_sofa_fuzzy_gp4)
+
+# global 5th order polynomial
+mod_sofa_fuzzy_gp5<-rdrobust(x=m1$hgb, y=m1$msofa_out, fuzzy=m1$tx, c=7, h=c(7-min(m1$hgb), max(m1$hgb)-7), all=T, covs=c(m1$AGE+m1$sex+m1$charlson+m1$sofa_co+m1$mv_co+m1$press_co+m1$tx_co), p=5, kernel="uniform")
+summary(mod_sofa_fuzzy_gp5)
+
+# subgroup sepsis/no sepsis
+m1s<-m1 %>% filter(sep==1)
+m1ns<-m1 %>% filter(sep==0)
+
+mod_sofa_fuzzy_sepsis<-rdrobust(x=m1s$hgb, y=m1s$msofa_out, fuzzy=m1s$tx, c=7, bwselect="msetwo", all=T, covs=c(m1s$AGE+m1s$sex+m1s$charlson+m1s$sofa_co+m1s$mv_co+m1s$press_co+m1s$tx_co))
+
+mod_sofa_fuzzy_no_sepsis<-rdrobust(x=m1ns$hgb, y=m1ns$msofa_out, fuzzy=m1ns$tx, c=7, bwselect="msetwo", all=T, covs=c(m1ns$AGE+m1ns$sex+m1ns$charlson+m1ns$sofa_co+m1ns$mv_co+m1ns$press_co+m1ns$tx_co))
+
+summary(mod_sofa_fuzzy_sepsis)
+summary(mod_sofa_fuzzy_no_sepsis)
+
+interaction_sepsis=(1-pnorm(abs((mod_sofa_fuzzy_sepsis$coef[2]-mod_sofa_fuzzy_no_sepsis$coef[2])/sqrt((mod_sofa_fuzzy_sepsis$se[3]^2)+(mod_sofa_fuzzy_no_sepsis$se[3]^2)))))*2
+
+# subgroup cardiac icu/no cardiac icu
+m1c<-m1 %>% filter(cardiac_icu==1)
+m1nc<-m1 %>% filter(cardiac_icu==0)
+
+mod_sofa_fuzzy_cardiac_icu<-rdrobust(x=m1c$hgb, y=m1c$msofa_out, fuzzy=m1c$tx, c=7, bwselect="msetwo", all=T, covs=c(m1c$AGE+m1c$sex+m1c$charlson+m1c$sofa_co+m1c$mv_co+m1c$press_co+m1c$tx_co))
+
+mod_sofa_fuzzy_no_cardiac_icu<-rdrobust(x=m1nc$hgb, y=m1nc$msofa_out, fuzzy=m1nc$tx, c=7, bwselect="msetwo", all=T, covs=c(m1nc$AGE+m1nc$sex+m1nc$charlson+m1nc$sofa_co+m1nc$mv_co+m1nc$press_co+m1nc$tx_co))
+
+summary(mod_sofa_fuzzy_cardiac_icu)
+summary(mod_sofa_fuzzy_no_cardiac_icu)
+
+interaction_cardiac_icu=(1-pnorm(abs((mod_sofa_fuzzy_cardiac_icu$coef[2]-mod_sofa_fuzzy_no_cardiac_icu$coef[2])/sqrt((mod_sofa_fuzzy_cardiac_icu$se[3]^2)+(mod_sofa_fuzzy_no_cardiac_icu$se[3]^2)))))*2
+```
+
+# graphing
+```{r mimic graphing}
+# covariable age
+m1age_co<-rdplot(y=m1$AGE, x=m1$hgb, c=7, shade=F, ci=F, p=1, h=mod_age$bws[1,], kernel="triangular")
+m1plot_m1age_co<-m1age_co$rdplot+
+  xlab("Hemoglobin - g/dL")+
+  ylab("Covariable age - years")+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+  geom_rect(aes(xmin=7-mod_age$bws[1,1], xmax=7+mod_age$bws[1,2], ymin=-Inf, ymax=+Inf), alpha=1/10)+
+  coord_cartesian(ylim=c(0,80), xlim=c(5,10))+
+  annotate(geom="text",label="A", x=5, y=80)+
+  ggtitle("")
+m1plot_m1age_co
+
+# covariable sex
+m1sex<-rdplot(y=m1$sex, x=m1$hgb, c=7, shade=F, ci=F, p=1, h=mod_sex$bws[1,], kernel="triangular")
+m1plot_m1sex<-m1sex$rdplot+
+  xlab("Hemoglobin - g/dL")+
+  ylab("Covariable Female sex - proportion")+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+  geom_rect(aes(xmin=7-mod_sex$bws[1,1], xmax=7+mod_sex$bws[1,2], ymin=-Inf, ymax=+Inf), alpha=1/10)+
+  coord_cartesian(ylim=c(0,1), xlim=c(5,10))+
+  annotate(geom="text",label="B", x=5, y=1)+
+  ggtitle("")
+m1plot_m1sex
+
+# covariable sofa
+m1sofa_co<-rdplot(y=m1$sofa_co, x=m1$hgb, c=7, shade=F, ci=F, p=1, h=mod_sofa_co$bws[1,], kernel="triangular")
+m1plot_m1sofa_co<-m1sofa_co$rdplot+
+  xlab("Hemoglobin - g/dL")+
+  ylab("Covariable SOFA score - points")+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+  geom_rect(aes(xmin=7-mod_sofa_co$bws[1,1], xmax=7+mod_sofa_co$bws[1,2], ymin=-Inf, ymax=+Inf), alpha=1/10)+
+  coord_cartesian(ylim=c(0,15), xlim=c(5,10))+
+  annotate(geom="text",label="C", x=5, y=15)+
+  ggtitle("")
+m1plot_m1sofa_co
+
+# covariable charlson
+m1charlson_co<-rdplot(y=m1$charlson, x=m1$hgb, c=7, shade=F, ci=F, p=1, h=mod_char$bws[1,], kernel="triangular")
+m1plot_m1charlson_co<-m1charlson_co$rdplot+
+  xlab("Hemoglobin - g/dL")+
+  ylab("Covariable Charlson score - points")+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+  geom_rect(aes(xmin=7-mod_char$bws[1,1], xmax=7+mod_char$bws[1,2], ymin=-Inf, ymax=+Inf), alpha=1/10)+
+  coord_cartesian(ylim=c(0,15), xlim=c(5,10))+
+  annotate(geom="text",label="D", x=5, y=15)+
+  ggtitle("")
+m1plot_m1charlson_co
+
+# covariable imv
+m1mv_co<-rdplot(y=m1$mv_co, x=m1$hgb, c=7, shade=F, ci=F, p=1, h=mod_mv_co$bws[1,], kernel="triangular")
+m1plot_m1mv_co<-m1mv_co$rdplot+
+  xlab("Hemoglobin - g/dL")+
+  ylab("Covariable use of invasive mechanical ventilation - proportion")+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+  geom_rect(aes(xmin=7-mod_mv_co$bws[1,1], xmax=7+mod_mv_co$bws[1,2], ymin=-Inf, ymax=+Inf), alpha=1/10)+
+  coord_cartesian(ylim=c(0,1), xlim=c(5,10))+
+  annotate(geom="text",label="E", x=5, y=1)+
+  ggtitle("")
+m1plot_m1mv_co
+
+# covariable vasopressors
+m1press_co<-rdplot(y=m1$press_co, x=m1$hgb, c=7, shade=F, ci=F, p=1, h=mod_press_co$bws[1,], kernel="triangular")
+m1plot_m1press_co<-m1press_co$rdplot+
+  xlab("Hemoglobin - g/dL")+
+  ylab("Covariable use of vasopressors - proportion")+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+  geom_rect(aes(xmin=7-mod_press_co$bws[1,1], xmax=7+mod_press_co$bws[1,2], ymin=-Inf, ymax=+Inf), alpha=1/10)+
+  coord_cartesian(ylim=c(0,1), xlim=c(5,10))+
+  annotate(geom="text",label="F", x=5, y=1)+
+  ggtitle("")
+m1plot_m1press_co
+
+# covariable transfusion
+m1pr_co<-rdplot(y=m1$tx_co, x=m1$hgb, c=7, shade=F, ci=F, p=1, h=mod_tx_co$bws[1,], kernel="triangular")
+m1plot_m1pr_co<-m1pr_co$rdplot+
+  xlab("Hemoglobin - g/dL")+
+  ylab("Covariable blood transfusion - proportion")+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+  geom_rect(aes(xmin=7-mod_tx_co$bws[1,1], xmax=7+mod_tx_co$bws[1,2], ymin=-Inf, ymax=+Inf), alpha=1/10)+
+  coord_cartesian(ylim=c(0,1), xlim=c(5,10))+
+  annotate(geom="text",label="G", x=5, y=1)+
+  ggtitle("")
+m1plot_m1pr_co
+
+# exposure
+m1pr_ex<-rdplot(y=m1$tx, x=m1$hgb, c=7, shade=F, ci=F, p=1, h=mod_tx$bws[1,], kernel="triangular")
+m1plot_pr_ex<-m1pr_ex$rdplot+
+  xlab("Hemoglobin - g/dL")+
+  ylab("Blood transfusion - proportion")+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+  geom_rect(aes(xmin=7-mod_tx$bws[1,1], xmax=7+mod_tx$bws[1,2], ymin=-Inf, ymax=+Inf), alpha=1/10)+
+  coord_cartesian(ylim=c(0,1), xlim=c(5,10))+
+  annotate(geom="text",label="A", x=5, y=1)+
+  ggtitle("")
+m1plot_pr_ex
+
+# outcome
+# main
+m1pr_out<-rdplot(y=m1$msofa_out, x=m1$hgb, c=7, shade=F, ci=F, p=1, h=mod_sofa_fuzzy$bws[1,], kernel="triangular")
+m1plot_pr_out<-m1pr_out$rdplot+
+  xlab("Hemoglobin - g/dL")+
+  ylab("Modified SOFA Score outcome - proportion")+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+  geom_rect(aes(xmin=7-mod_sofa_fuzzy$bws[1,1], xmax=7+mod_sofa_fuzzy$bws[1,2], ymin=-Inf, ymax=+Inf), alpha=1/10)+
+  coord_cartesian(ylim=c(0,25), xlim=c(5,10))+
+  annotate(geom="text",label="B", x=5, y=25)+
+  ggtitle("")
+m1plot_pr_out
+
+# sensitivities
+#hb
+m1pr_out_hb<-rdplot(y=m1$msofa_out, x=m1$hgb, c=7, shade=F, ci=F, p=1, h=mod_sofa_fuzzy_hb$bws[1,], kernel="triangular")
+m1plot_pr_out_hb<-m1pr_out_hb$rdplot+
+  xlab("Hemoglobin - g/dL")+
+  ylab("Modified SOFA Score outcome - proportion")+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+  geom_rect(aes(xmin=7-mod_sofa_fuzzy_hb$bws[1,1], xmax=7+mod_sofa_fuzzy_hb$bws[1,2], ymin=-Inf, ymax=+Inf), alpha=1/10)+
+  coord_cartesian(ylim=c(0,25), xlim=c(5,10))+
+  ggtitle("Half Bandwidth")+
+  annotate(geom="text",label="A", x=5, y=25)
+m1plot_pr_out_hb
+
+#db
+m1pr_out_db<-rdplot(y=m1$msofa_out, x=m1$hgb, c=7, shade=F, ci=F, p=1, h=mod_sofa_fuzzy_db$bws[1,], kernel="triangular")
+m1plot_pr_out_db<-m1pr_out_db$rdplot+
+  xlab("Hemoglobin - g/dL")+
+  ylab("Modified SOFA Score outcome - proportion")+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+  geom_rect(aes(xmin=7-mod_sofa_fuzzy_db$bws[1,1], xmax=7+mod_sofa_fuzzy_db$bws[1,2], ymin=-Inf, ymax=+Inf), alpha=1/10)+
+  coord_cartesian(ylim=c(0,25), xlim=c(5,10))+
+  ggtitle("Double Bandwidth")+
+  annotate(geom="text",label="B", x=5, y=25)
+m1plot_pr_out_db
+
+#sb
+m1pr_out_sb<-rdplot(y=m1$msofa_out, x=m1$hgb, c=7, shade=F, ci=F, p=1, h=mod_sofa_fuzzy_sb$bws[1,], kernel="triangular")
+m1plot_pr_out_sb<-m1pr_out_sb$rdplot+
+  xlab("Hemoglobin - g/dL")+
+  ylab("Modified SOFA Score outcome - proportion")+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+  geom_rect(aes(xmin=7-mod_sofa_fuzzy_sb$bws[1,1], xmax=7+mod_sofa_fuzzy_sb$bws[1,2], ymin=-Inf, ymax=+Inf), alpha=1/10)+
+  coord_cartesian(ylim=c(0,25), xlim=c(5,10))+
+  ggtitle("Symmetric Bandwidth")+
+  annotate(geom="text",label="C", x=5, y=25)
+m1plot_pr_out_sb
+
+#lq
+m1pr_out_lq<-rdplot(y=m1$msofa_out, x=m1$hgb, c=7, shade=F, ci=F, p=2, h=mod_sofa_fuzzy_lq$bws[1,], kernel="triangular")
+m1plot_pr_out_lq<-m1pr_out_lq$rdplot+
+  xlab("Hemoglobin - g/dL")+
+  ylab("Modified SOFA Score outcome - proportion")+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+  geom_rect(aes(xmin=7-mod_sofa_fuzzy_lq$bws[1,1], xmax=7+mod_sofa_fuzzy_lq$bws[1,2], ymin=-Inf, ymax=+Inf), alpha=1/10)+
+  coord_cartesian(ylim=c(0,25), xlim=c(5,10))+
+  ggtitle("Local Quadratic Regression")+
+  annotate(geom="text",label="D", x=5, y=25)
+m1plot_pr_out_lq
+
+#gp3
+m1pr_out_gp3<-rdplot(y=m1$msofa_out, x=m1$hgb, c=7, shade=F, ci=F, p=3, h=mod_sofa_fuzzy_gp3$bws[1,], kernel="uniform")
+m1plot_pr_out_gp3<-m1pr_out_gp3$rdplot+
+  xlab("Hemoglobin - g/dL")+
+  ylab("Modified SOFA Score outcome - proportion")+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+  geom_rect(aes(xmin=7-mod_sofa_fuzzy_gp3$bws[1,1], xmax=7+mod_sofa_fuzzy_gp3$bws[1,2], ymin=-Inf, ymax=+Inf), alpha=1/10)+
+  coord_cartesian(ylim=c(0,25), xlim=c(5,10))+
+  ggtitle("3rd Degree Global Polynomial")+
+  annotate(geom="text",label="E", x=5, y=25)
+m1plot_pr_out_gp3
+
+#gp4
+m1pr_out_gp4<-rdplot(y=m1$msofa_out, x=m1$hgb, c=7, shade=F, ci=F, p=4, h=mod_sofa_fuzzy_gp4$bws[1,], kernel="uniform")
+m1plot_pr_out_gp4<-m1pr_out_gp4$rdplot+
+  xlab("Hemoglobin - g/dL")+
+  ylab("Modified SOFA Score outcome - proportion")+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+  geom_rect(aes(xmin=7-mod_sofa_fuzzy_gp4$bws[1,1], xmax=7+mod_sofa_fuzzy_gp4$bws[1,2], ymin=-Inf, ymax=+Inf), alpha=1/10)+
+  coord_cartesian(ylim=c(0,25), xlim=c(5,10))+
+  ggtitle("4th Degree Global Polynomial")+
+  annotate(geom="text",label="F", x=5, y=25)
+m1plot_pr_out_gp4
+
+#gp5
+m1pr_out_gp5<-rdplot(y=m1$msofa_out, x=m1$hgb, c=7, shade=F, ci=F, p=5, h=mod_sofa_fuzzy_gp5$bws[1,], kernel="uniform")
+m1plot_pr_out_gp5<-m1pr_out_gp5$rdplot+
+  xlab("Hemoglobin - g/dL")+
+  ylab("Modified SOFA Score outcome - proportion")+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+  geom_rect(aes(xmin=7-mod_sofa_fuzzy_gp5$bws[1,1], xmax=7+mod_sofa_fuzzy_gp5$bws[1,2], ymin=-Inf, ymax=+Inf), alpha=1/10)+
+  coord_cartesian(ylim=c(0,25), xlim=c(5,10))+
+  ggtitle("5th Degree Global Polynomial")+
+  annotate(geom="text",label="G", x=5, y=25)
+m1plot_pr_out_gp5
+```
+
+
+# eicu read in 
+```{r eicu read-in}
+e1<-read.csv("el_12012021.csv")
+e1<- e1 %>%
+  rename(AGE=age, sex=female, mv_co=imv_co, tx_co=prbc_co, tx=prbc_ex, mv_out=imv_out, death=death_out)
+
+e1$tx_co[is.na(e1$tx_co)]<-0
+summary(e1$hgb)
+
+sd(e1$msofa_out)
+```
+
+# table 1 eicu
+```{r table 1 eicu}
+summary(e1$AGE)
+summary(factor(e1$sex))
+summary(e1$sex)
+summary(e1$sofa_co)
+summary(e1$charlson)
+summary(factor(e1$mv_co))
+summary(e1$mv_co)
+summary(factor(e1$press_co))
+summary(e1$press_co)
+summary(factor(e1$tx_co))
+summary(e1$tx_co)
+```
+
+
+
+# eicu rd
+```{r eicu rd}
+mod_age<-rdrobust(x=e1$hgb, y=e1$AGE, c=7, bwselect="msetwo", all=T)
+mod_sex<-rdrobust(x=e1$hgb, y=e1$sex, c=7, bwselect="msetwo", all=T)
+mod_sofa_co<-rdrobust(x=e1$hgb, y=e1$sofa_co, c=7, bwselect="msetwo", all=T)
+mod_char<-rdrobust(x=e1$hgb, y=e1$charlson, c=7, bwselect="msetwo", all=T)
+mod_mv_co<-rdrobust(x=e1$hgb, y=e1$mv_co, c=7, bwselect="msetwo", all=T)
+mod_press_co<-rdrobust(x=e1$hgb, y=e1$press_co, c=7, bwselect="msetwo", all=T)
+mod_tx_co<-rdrobust(x=e1$hgb, y=e1$tx_co, c=7, bwselect="msetwo", all=T)
+mod_tx<-rdrobust(x=e1$hgb, y=e1$tx, c=7, bwselect="msetwo", all=T)
+
+summary(mod_age)
+summary(mod_sex)
+summary(mod_sofa_co)
+summary(mod_char)
+summary(mod_mv_co)
+summary(mod_press_co)
+summary(mod_tx_co)
+summary(mod_tx)
+
+# main outcome
+mod_sofa_fuzzy<-rdrobust(x=e1$hgb, y=e1$msofa_out, fuzzy=e1$tx, c=7, bwselect="msetwo", all=T, covs=c(e1$AGE+e1$sex+e1$charlson+e1$sofa_co+e1$mv_co+e1$press_co+e1$tx_co))
+mod_sofa<-rdrobust(x=e1$hgb, y=e1$msofa_out, c=7, bwselect="msetwo", all=T, covs=c(e1$AGE+e1$sex+e1$charlson+e1$sofa_co+e1$mv_co+e1$press_co+e1$tx_co))
+summary(mod_sofa_fuzzy)
+summary(mod_sofa)
+
+# hgb
+mod_hgb_fuzzy<-rdrobust(x=e1$hgb, y=e1$hgb_out, fuzzy=e1$tx, c=7, bwselect="msetwo", all=T, covs=c(e1$AGE+e1$sex+e1$charlson+e1$sofa_co+e1$mv_co+e1$press_co+e1$tx_co))
+mod_hgb<-rdrobust(x=e1$hgb, y=e1$hgb_out, c=7, bwselect="msetwo", all=T, covs=c(e1$AGE+e1$sex+e1$charlson+e1$sofa_co+e1$mv_co+e1$press_co+e1$tx_co))
+summary(mod_hgb_fuzzy)
+summary(mod_hgb)
+
+# imv
+mod_imv_fuzzy<-rdrobust(x=e1$hgb, y=e1$mv_out, fuzzy=e1$tx, c=7, bwselect="msetwo", all=T, covs=c(e1$AGE+e1$sex+e1$charlson+e1$sofa_co+e1$mv_co+e1$press_co+e1$tx_co))
+mod_imv<-rdrobust(x=e1$hgb, y=e1$mv_out, c=7, bwselect="msetwo", all=T, covs=c(e1$AGE+e1$sex+e1$charlson+e1$sofa_co+e1$mv_co+e1$press_co+e1$tx_co))
+summary(mod_imv_fuzzy)
+summary(mod_imv)
+
+# vasopressors
+mod_press_fuzzy<-rdrobust(x=e1$hgb, y=e1$press_out, fuzzy=e1$tx, c=7, bwselect="msetwo", all=T, covs=c(e1$AGE+e1$sex+e1$charlson+e1$sofa_co+e1$mv_co+e1$press_co+e1$tx_co))
+mod_press<-rdrobust(x=e1$hgb, y=e1$press_out, c=7, bwselect="msetwo", all=T, covs=c(e1$AGE+e1$sex+e1$charlson+e1$sofa_co+e1$mv_co+e1$press_co+e1$tx_co))
+summary(mod_press_fuzzy)
+summary(mod_press)
+
+# death
+mod_death_fuzzy<-rdrobust(x=e1$hgb, y=e1$death, fuzzy=e1$tx, c=7, bwselect="msetwo", all=T, covs=c(e1$AGE+e1$sex+e1$charlson+e1$sofa_co+e1$mv_co+e1$press_co+e1$tx_co))
+mod_death<-rdrobust(x=e1$hgb, y=e1$death, c=7, bwselect="msetwo", all=T, covs=c(e1$AGE+e1$sex+e1$charlson+e1$sofa_co+e1$mv_co+e1$press_co+e1$tx_co))
+summary(mod_death_fuzzy)
+summary(mod_death)
+
+# sensitivity analyses
+# half bandwidth
+mod_sofa_fuzzy_hb<-rdrobust(x=e1$hgb, y=e1$msofa_out, fuzzy=e1$tx, c=7, h=mod_sofa_fuzzy$bws[1,]/2, b=mod_sofa_fuzzy$bws[2,], all=T, covs=c(e1$AGE+e1$sex+e1$charlson+e1$sofa_co+e1$mv_co+e1$press_co+e1$tx_co))
+summary(mod_sofa_fuzzy_hb)
+
+# double bandwidth
+mod_sofa_fuzzy_db<-rdrobust(x=e1$hgb, y=e1$msofa_out, fuzzy=e1$tx, c=7, h=mod_sofa_fuzzy$bws[1,]*2, b=mod_sofa_fuzzy$bws[2,], all=T, covs=c(e1$AGE+e1$sex+e1$charlson+e1$sofa_co+e1$mv_co+e1$press_co+e1$tx_co))
+summary(mod_sofa_fuzzy_db)
+
+# symmetric bandwidth
+mod_sofa_fuzzy_sb<-rdrobust(x=e1$hgb, y=e1$msofa_out, fuzzy=e1$tx, c=7, bwselect="mserd", all=T, covs=c(e1$AGE+e1$sex+e1$charlson+e1$sofa_co+e1$mv_co+e1$press_co+e1$tx_co))
+summary(mod_sofa_fuzzy_sb)
+
+# local quadratic
+mod_sofa_fuzzy_lq<-rdrobust(x=e1$hgb, y=e1$msofa_out, fuzzy=e1$tx, c=7, bwselect="msetwo", all=T, covs=c(e1$AGE+e1$sex+e1$charlson+e1$sofa_co+e1$mv_co+e1$press_co+e1$tx_co), p=2)
+summary(mod_sofa_fuzzy_lq)
+
+# global 3rd order polynomial
+mod_sofa_fuzzy_gp3<-rdrobust(x=e1$hgb, y=e1$msofa_out, fuzzy=e1$tx, c=7, h=c(7-min(e1$hgb), max(e1$hgb)-7), all=T, covs=c(e1$AGE+e1$sex+e1$charlson+e1$sofa_co+e1$mv_co+e1$press_co+e1$tx_co), p=3, kernel="uniform")
+summary(mod_sofa_fuzzy_gp3)
+
+# global 4th order polynomial
+mod_sofa_fuzzy_gp4<-rdrobust(x=e1$hgb, y=e1$msofa_out, fuzzy=e1$tx, c=7, h=c(7-min(e1$hgb), max(e1$hgb)-7), all=T, covs=c(e1$AGE+e1$sex+e1$charlson+e1$sofa_co+e1$mv_co+e1$press_co+e1$tx_co), p=4, kernel="uniform")
+summary(mod_sofa_fuzzy_gp4)
+
+# global 5th order polynomial
+mod_sofa_fuzzy_gp5<-rdrobust(x=e1$hgb, y=e1$msofa_out, fuzzy=e1$tx, c=7, h=c(7-min(e1$hgb), max(e1$hgb)-7), all=T, covs=c(e1$AGE+e1$sex+e1$charlson+e1$sofa_co+e1$mv_co+e1$press_co+e1$tx_co), p=5, kernel="uniform")
+summary(mod_sofa_fuzzy_gp5)
+
+
+# subgroup sepsis/no sepsis
+e1s<-e1 %>% filter(sep==1)
+e1ns<-e1 %>% filter(sep==0)
+
+mod_sofa_fuzzy_sepsis<-rdrobust(x=e1s$hgb, y=e1s$msofa_out, fuzzy=e1s$tx, c=7, bwselect="msetwo", all=T, covs=c(e1s$AGE+e1s$sex+e1s$charlson+e1s$sofa_co+e1s$mv_co+e1s$press_co+e1s$tx_co))
+
+mod_sofa_fuzzy_no_sepsis<-rdrobust(x=e1ns$hgb, y=e1ns$msofa_out, fuzzy=e1ns$tx, c=7, bwselect="msetwo", all=T, covs=c(e1ns$AGE+e1ns$sex+e1ns$charlson+e1ns$sofa_co+e1ns$mv_co+e1ns$press_co+e1ns$tx_co))
+
+summary(mod_sofa_fuzzy_sepsis)
+summary(mod_sofa_fuzzy_no_sepsis)
+
+interaction_sepsis=(1-pnorm(abs((mod_sofa_fuzzy_sepsis$coef[2]-mod_sofa_fuzzy_no_sepsis$coef[2])/sqrt((mod_sofa_fuzzy_sepsis$se[3]^2)+(mod_sofa_fuzzy_no_sepsis$se[3]^2)))))*2
+
+# subgroup cardiac icu/no cardiac icu
+e1c<-e1 %>% filter(cardiac_icu==1)
+e1nc<-e1 %>% filter(cardiac_icu==0)
+
+mod_sofa_fuzzy_cardiac_icu<-rdrobust(x=e1c$hgb, y=e1c$msofa_out, fuzzy=e1c$tx, c=7, bwselect="msetwo", all=T, covs=c(e1c$AGE+e1c$sex+e1c$charlson+e1c$sofa_co+e1c$mv_co+e1c$press_co+e1c$tx_co))
+
+mod_sofa_fuzzy_no_cardiac_icu<-rdrobust(x=e1nc$hgb, y=e1nc$msofa_out, fuzzy=e1nc$tx, c=7, bwselect="msetwo", all=T, covs=c(e1nc$AGE+e1nc$sex+e1nc$charlson+e1nc$sofa_co+e1nc$mv_co+e1nc$press_co+e1nc$tx_co))
+
+summary(mod_sofa_fuzzy_cardiac_icu)
+summary(mod_sofa_fuzzy_no_cardiac_icu)
+
+interaction_cardiac_icu=(1-pnorm(abs((mod_sofa_fuzzy_cardiac_icu$coef[2]-mod_sofa_fuzzy_no_cardiac_icu$coef[2])/sqrt((mod_sofa_fuzzy_cardiac_icu$se[3]^2)+(mod_sofa_fuzzy_no_cardiac_icu$se[3]^2)))))*2
+```
+
+# graphing
+```{r eicu graphing}
+# covariable age
+e1age_co<-rdplot(y=e1$AGE, x=e1$hgb, c=7, shade=F, ci=F, p=1, h=mod_age$bws[1,], kernel="triangular")
+e1plot_e1age_co<-e1age_co$rdplot+
+  xlab("Hemoglobin - g/dL")+
+  ylab("Covariable age - years")+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+  geom_rect(aes(xmin=7-mod_age$bws[1,1], xmax=7+mod_age$bws[1,2], ymin=-Inf, ymax=+Inf), alpha=1/10)+
+  coord_cartesian(ylim=c(0,80), xlim=c(5,10))+
+  annotate(geom="text",label="A", x=5, y=80)+
+  ggtitle("")
+e1plot_e1age_co
+
+# covariable sex
+e1sex<-rdplot(y=e1$sex, x=e1$hgb, c=7, shade=F, ci=F, p=1, h=mod_sex$bws[1,], kernel="triangular")
+e1plot_e1sex<-e1sex$rdplot+
+  xlab("Hemoglobin - g/dL")+
+  ylab("Covariable Female sex - proportion")+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+  geom_rect(aes(xmin=7-mod_sex$bws[1,1], xmax=7+mod_sex$bws[1,2], ymin=-Inf, ymax=+Inf), alpha=1/10)+
+  coord_cartesian(ylim=c(0,1), xlim=c(5,10))+
+  annotate(geom="text",label="B", x=5, y=1)+
+  ggtitle("")
+e1plot_e1sex
+
+# covariable sofa
+e1sofa_co<-rdplot(y=e1$sofa_co, x=e1$hgb, c=7, shade=F, ci=F, p=1, h=mod_sofa_co$bws[1,], kernel="triangular")
+e1plot_e1sofa_co<-e1sofa_co$rdplot+
+  xlab("Hemoglobin - g/dL")+
+  ylab("Covariable SOFA score - points")+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+  geom_rect(aes(xmin=7-mod_sofa_co$bws[1,1], xmax=7+mod_sofa_co$bws[1,2], ymin=-Inf, ymax=+Inf), alpha=1/10)+
+  coord_cartesian(ylim=c(0,15), xlim=c(5,10))+
+  annotate(geom="text",label="C", x=5, y=15)+
+  ggtitle("")
+e1plot_e1sofa_co
+
+# covariable charlson
+e1charlson_co<-rdplot(y=e1$charlson, x=e1$hgb, c=7, shade=F, ci=F, p=1, h=mod_char$bws[1,], kernel="triangular")
+e1plot_e1charlson_co<-e1charlson_co$rdplot+
+  xlab("Hemoglobin - g/dL")+
+  ylab("Covariable Charlson score - points")+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+  geom_rect(aes(xmin=7-mod_char$bws[1,1], xmax=7+mod_char$bws[1,2], ymin=-Inf, ymax=+Inf), alpha=1/10)+
+  coord_cartesian(ylim=c(0,15), xlim=c(5,10))+
+  annotate(geom="text",label="D", x=5, y=15)+
+  ggtitle("")
+e1plot_e1charlson_co
+
+# covariable imv
+e1mv_co<-rdplot(y=e1$mv_co, x=e1$hgb, c=7, shade=F, ci=F, p=1, h=mod_mv_co$bws[1,], kernel="triangular")
+e1plot_e1mv_co<-e1mv_co$rdplot+
+  xlab("Hemoglobin - g/dL")+
+  ylab("Covariable use of invasive mechanical ventilation - proportion")+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+  geom_rect(aes(xmin=7-mod_mv_co$bws[1,1], xmax=7+mod_mv_co$bws[1,2], ymin=-Inf, ymax=+Inf), alpha=1/10)+
+  coord_cartesian(ylim=c(0,1), xlim=c(5,10))+
+  annotate(geom="text",label="E", x=5, y=1)+
+  ggtitle("")
+e1plot_e1mv_co
+
+# covariable vasopressors
+e1press_co<-rdplot(y=e1$press_co, x=e1$hgb, c=7, shade=F, ci=F, p=1, h=mod_press_co$bws[1,], kernel="triangular")
+e1plot_e1press_co<-e1press_co$rdplot+
+  xlab("Hemoglobin - g/dL")+
+  ylab("Covariable use of vasopressors - proportion")+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+  geom_rect(aes(xmin=7-mod_press_co$bws[1,1], xmax=7+mod_press_co$bws[1,2], ymin=-Inf, ymax=+Inf), alpha=1/10)+
+  coord_cartesian(ylim=c(0,1), xlim=c(5,10))+
+  annotate(geom="text",label="F", x=5, y=1)+
+  ggtitle("")
+e1plot_e1press_co
+
+# covariable transfusion
+e1pr_co<-rdplot(y=e1$tx_co, x=e1$hgb, c=7, shade=F, ci=F, p=1, h=mod_tx_co$bws[1,], kernel="triangular")
+e1plot_e1pr_co<-e1pr_co$rdplot+
+  xlab("Hemoglobin - g/dL")+
+  ylab("Covariable blood transfusion - proportion")+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+  geom_rect(aes(xmin=7-mod_tx_co$bws[1,1], xmax=7+mod_tx_co$bws[1,2], ymin=-Inf, ymax=+Inf), alpha=1/10)+
+  coord_cartesian(ylim=c(0,1), xlim=c(5,10))+
+  annotate(geom="text",label="G", x=5, y=1)+
+  ggtitle("")
+e1plot_e1pr_co
+
+# exposure
+e1pr_ex<-rdplot(y=e1$tx, x=e1$hgb, c=7, shade=F, ci=F, p=1, h=mod_tx$bws[1,], kernel="triangular")
+e1plot_pr_ex<-e1pr_ex$rdplot+
+  xlab("Hemoglobin - g/dL")+
+  ylab("Blood transfusion - proportion")+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+  geom_rect(aes(xmin=7-mod_tx$bws[1,1], xmax=7+mod_tx$bws[1,2], ymin=-Inf, ymax=+Inf), alpha=1/10)+
+  coord_cartesian(ylim=c(0,1), xlim=c(5,10))+
+  annotate(geom="text",label="C", x=5, y=1)+
+  ggtitle("")
+e1plot_pr_ex
+
+# outcome
+# main
+e1pr_out<-rdplot(y=e1$msofa_out, x=e1$hgb, c=7, shade=F, ci=F, p=1, h=mod_sofa_fuzzy$bws[1,], kernel="triangular")
+e1plot_pr_out<-e1pr_out$rdplot+
+  xlab("Hemoglobin - g/dL")+
+  ylab("Modified SOFA Score outcome - proportion")+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+  geom_rect(aes(xmin=7-mod_sofa_fuzzy$bws[1,1], xmax=7+mod_sofa_fuzzy$bws[1,2], ymin=-Inf, ymax=+Inf), alpha=1/10)+
+  coord_cartesian(ylim=c(0,25), xlim=c(5,10))+
+  annotate(geom="text",label="D", x=5, y=25)+
+  ggtitle("")
+e1plot_pr_out
+
+# sensitivities
+#hb
+e1pr_out_hb<-rdplot(y=e1$msofa_out, x=e1$hgb, c=7, shade=F, ci=F, p=1, h=mod_sofa_fuzzy_hb$bws[1,], kernel="triangular")
+e1plot_pr_out_hb<-e1pr_out_hb$rdplot+
+  xlab("Hemoglobin - g/dL")+
+  ylab("Modified SOFA Score outcome - proportion")+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+  geom_rect(aes(xmin=7-mod_sofa_fuzzy_hb$bws[1,1], xmax=7+mod_sofa_fuzzy_hb$bws[1,2], ymin=-Inf, ymax=+Inf), alpha=1/10)+
+  coord_cartesian(ylim=c(0,25), xlim=c(5,10))+
+  ggtitle("Half Bandwidth")+
+  annotate(geom="text",label="A", x=5, y=25)
+e1plot_pr_out_hb
+
+#db
+e1pr_out_db<-rdplot(y=e1$msofa_out, x=e1$hgb, c=7, shade=F, ci=F, p=1, h=mod_sofa_fuzzy_db$bws[1,], kernel="triangular")
+e1plot_pr_out_db<-e1pr_out_db$rdplot+
+  xlab("Hemoglobin - g/dL")+
+  ylab("Modified SOFA Score outcome - proportion")+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+  geom_rect(aes(xmin=7-mod_sofa_fuzzy_db$bws[1,1], xmax=7+mod_sofa_fuzzy_db$bws[1,2], ymin=-Inf, ymax=+Inf), alpha=1/10)+
+  coord_cartesian(ylim=c(0,25), xlim=c(5,10))+
+  ggtitle("Double Bandwidth")+
+  annotate(geom="text",label="B", x=5, y=25)
+e1plot_pr_out_db
+
+#sb
+e1pr_out_sb<-rdplot(y=e1$msofa_out, x=e1$hgb, c=7, shade=F, ci=F, p=1, h=mod_sofa_fuzzy_sb$bws[1,], kernel="triangular")
+e1plot_pr_out_sb<-e1pr_out_sb$rdplot+
+  xlab("Hemoglobin - g/dL")+
+  ylab("Modified SOFA Score outcome - proportion")+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+  geom_rect(aes(xmin=7-mod_sofa_fuzzy_sb$bws[1,1], xmax=7+mod_sofa_fuzzy_sb$bws[1,2], ymin=-Inf, ymax=+Inf), alpha=1/10)+
+  coord_cartesian(ylim=c(0,25), xlim=c(5,10))+
+  ggtitle("Symmetric Bandwidth")+
+  annotate(geom="text",label="C", x=5, y=25)
+e1plot_pr_out_sb
+
+#lq
+e1pr_out_lq<-rdplot(y=e1$msofa_out, x=e1$hgb, c=7, shade=F, ci=F, p=2, h=mod_sofa_fuzzy_lq$bws[1,], kernel="triangular")
+e1plot_pr_out_lq<-e1pr_out_lq$rdplot+
+  xlab("Hemoglobin - g/dL")+
+  ylab("Modified SOFA Score outcome - proportion")+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+  geom_rect(aes(xmin=7-mod_sofa_fuzzy_lq$bws[1,1], xmax=7+mod_sofa_fuzzy_lq$bws[1,2], ymin=-Inf, ymax=+Inf), alpha=1/10)+
+  coord_cartesian(ylim=c(0,25), xlim=c(5,10))+
+  ggtitle("Local Quadratic Regression")+
+  annotate(geom="text",label="D", x=5, y=25)
+e1plot_pr_out_lq
+
+#gp3
+e1pr_out_gp3<-rdplot(y=e1$msofa_out, x=e1$hgb, c=7, shade=F, ci=F, p=3, h=mod_sofa_fuzzy_gp3$bws[1,], kernel="uniform")
+e1plot_pr_out_gp3<-e1pr_out_gp3$rdplot+
+  xlab("Hemoglobin - g/dL")+
+  ylab("Modified SOFA Score outcome - proportion")+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+  geom_rect(aes(xmin=7-mod_sofa_fuzzy_gp3$bws[1,1], xmax=7+mod_sofa_fuzzy_gp3$bws[1,2], ymin=-Inf, ymax=+Inf), alpha=1/10)+
+  coord_cartesian(ylim=c(0,25), xlim=c(5,10))+
+  ggtitle("3rd Degree Global Polynomial")+
+  annotate(geom="text",label="E", x=5, y=25)
+e1plot_pr_out_gp3
+
+#gp4
+e1pr_out_gp4<-rdplot(y=e1$msofa_out, x=e1$hgb, c=7, shade=F, ci=F, p=4, h=mod_sofa_fuzzy_gp4$bws[1,], kernel="uniform")
+e1plot_pr_out_gp4<-e1pr_out_gp4$rdplot+
+  xlab("Hemoglobin - g/dL")+
+  ylab("Modified SOFA Score outcome - proportion")+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+  geom_rect(aes(xmin=7-mod_sofa_fuzzy_gp4$bws[1,1], xmax=7+mod_sofa_fuzzy_gp4$bws[1,2], ymin=-Inf, ymax=+Inf), alpha=1/10)+
+  coord_cartesian(ylim=c(0,25), xlim=c(5,10))+
+  ggtitle("4th Degree Global Polynomial")+
+  annotate(geom="text",label="F", x=5, y=25)
+e1plot_pr_out_gp4
+
+#gp5
+e1pr_out_gp5<-rdplot(y=e1$msofa_out, x=e1$hgb, c=7, shade=F, ci=F, p=5, h=mod_sofa_fuzzy_gp5$bws[1,], kernel="uniform")
+e1plot_pr_out_gp5<-e1pr_out_gp5$rdplot+
+  xlab("Hemoglobin - g/dL")+
+  ylab("Modified SOFA Score outcome - proportion")+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+  geom_rect(aes(xmin=7-mod_sofa_fuzzy_gp5$bws[1,1], xmax=7+mod_sofa_fuzzy_gp5$bws[1,2], ymin=-Inf, ymax=+Inf), alpha=1/10)+
+  coord_cartesian(ylim=c(0,25), xlim=c(5,10))+
+  ggtitle("5th Degree Global Polynomial")+
+  annotate(geom="text",label="G", x=5, y=25)
+e1plot_pr_out_gp5
+```
+
+# table 1 premier
+```{r table 1 premier}
+summary(q1$AGE)
+summary(factor(q1$sex))
+summary(q1$sex)
+summary(q1$sofa_co)
+summary(q1$charlson)
+summary(factor(q1$mv_co))
+summary(q1$mv_co)
+summary(factor(q1$press_co))
+summary(q1$press_co)
+summary(factor(q1$tx_co))
+summary(q1$tx_co)
+
+summary(q1$hgb)
+
+sd(q1$msofa_out)
+```
+
+# premier rd
+```{r premier rd}
+mod_age<-rdrobust(x=q1$hgb, y=q1$AGE, c=7, bwselect="msetwo", all=T)
+mod_sex<-rdrobust(x=q1$hgb, y=q1$sex, c=7, bwselect="msetwo", all=T)
+mod_sofa_co<-rdrobust(x=q1$hgb, y=q1$sofa_co, c=7, bwselect="msetwo", all=T)
+mod_char<-rdrobust(x=q1$hgb, y=q1$charlson, c=7, bwselect="msetwo", all=T)
+mod_mv_co<-rdrobust(x=q1$hgb, y=q1$mv_co, c=7, bwselect="msetwo", all=T)
+mod_press_co<-rdrobust(x=q1$hgb, y=q1$press_co, c=7, bwselect="msetwo", all=T)
+mod_tx_co<-rdrobust(x=q1$hgb, y=q1$tx_co, c=7, bwselect="msetwo", all=T)
+mod_tx<-rdrobust(x=q1$hgb, y=q1$tx, c=7, bwselect="msetwo", all=T)
+
+summary(mod_age)
+summary(mod_sex)
+summary(mod_sofa_co)
+summary(mod_char)
+summary(mod_mv_co)
+summary(mod_press_co)
+summary(mod_tx_co)
+summary(mod_tx)
+
+# main outcome
+mod_sofa_fuzzy<-rdrobust(x=q1$hgb, y=q1$msofa_out, fuzzy=q1$tx, c=7, bwselect="msetwo", all=T, covs=c(q1$AGE+q1$sex+q1$charlson+q1$sofa_co+q1$mv_co+q1$press_co+q1$tx_co))
+mod_sofa<-rdrobust(x=q1$hgb, y=q1$msofa_out, c=7, bwselect="msetwo", all=T, covs=c(q1$AGE+q1$sex+q1$charlson+q1$sofa_co+q1$mv_co+q1$press_co+q1$tx_co))
+summary(mod_sofa_fuzzy)
+summary(mod_sofa)
+
+# hgb
+mod_hgb_fuzzy<-rdrobust(x=q1$hgb, y=q1$hgb_out, fuzzy=q1$tx, c=7, bwselect="msetwo", all=T, covs=c(q1$AGE+q1$sex+q1$charlson+q1$sofa_co+q1$mv_co+q1$press_co+q1$tx_co))
+mod_hgb<-rdrobust(x=q1$hgb, y=q1$hgb_out, c=7, bwselect="msetwo", all=T, covs=c(q1$AGE+q1$sex+q1$charlson+q1$sofa_co+q1$mv_co+q1$press_co+q1$tx_co))
+summary(mod_hgb_fuzzy)
+summary(mod_hgb)
+
+# imv
+mod_imv_fuzzy<-rdrobust(x=q1$hgb, y=q1$mv_out, fuzzy=q1$tx, c=7, bwselect="msetwo", all=T, covs=c(q1$AGE+q1$sex+q1$charlson+q1$sofa_co+q1$mv_co+q1$press_co+q1$tx_co))
+mod_imv<-rdrobust(x=q1$hgb, y=q1$mv_out, c=7, bwselect="msetwo", all=T, covs=c(q1$AGE+q1$sex+q1$charlson+q1$sofa_co+q1$mv_co+q1$press_co+q1$tx_co))
+summary(mod_imv_fuzzy)
+summary(mod_imv)
+
+# vasopressors
+mod_press_fuzzy<-rdrobust(x=q1$hgb, y=q1$press_out, fuzzy=q1$tx, c=7, bwselect="msetwo", all=T, covs=c(q1$AGE+q1$sex+q1$charlson+q1$sofa_co+q1$mv_co+q1$press_co+q1$tx_co))
+mod_press<-rdrobust(x=q1$hgb, y=q1$press_out, c=7, bwselect="msetwo", all=T, covs=c(q1$AGE+q1$sex+q1$charlson+q1$sofa_co+q1$mv_co+q1$press_co+q1$tx_co))
+summary(mod_press_fuzzy)
+summary(mod_press)
+
+# death
+mod_death_fuzzy<-rdrobust(x=q1$hgb, y=q1$death, fuzzy=q1$tx, c=7, bwselect="msetwo", all=T, covs=c(q1$AGE+q1$sex+q1$charlson+q1$sofa_co+q1$mv_co+q1$press_co+q1$tx_co))
+mod_death<-rdrobust(x=q1$hgb, y=q1$death, c=7, bwselect="msetwo", all=T, covs=c(q1$AGE+q1$sex+q1$charlson+q1$sofa_co+q1$mv_co+q1$press_co+q1$tx_co))
+summary(mod_death_fuzzy)
+summary(mod_death)
+
+# sensitivity analyses
+# half bandwidth
+mod_sofa_fuzzy_hb<-rdrobust(x=q1$hgb, y=q1$msofa_out, fuzzy=q1$tx, c=7, h=mod_sofa_fuzzy$bws[1,]/2, b=mod_sofa_fuzzy$bws[2,], all=T, covs=c(q1$AGE+q1$sex+q1$charlson+q1$sofa_co+q1$mv_co+q1$press_co+q1$tx_co))
+summary(mod_sofa_fuzzy_hb)
+
+# double bandwidth
+mod_sofa_fuzzy_db<-rdrobust(x=q1$hgb, y=q1$msofa_out, fuzzy=q1$tx, c=7, h=mod_sofa_fuzzy$bws[1,]*2, b=mod_sofa_fuzzy$bws[2,], all=T, covs=c(q1$AGE+q1$sex+q1$charlson+q1$sofa_co+q1$mv_co+q1$press_co+q1$tx_co))
+summary(mod_sofa_fuzzy_db)
+
+# symmetric bandwidth
+mod_sofa_fuzzy_sb<-rdrobust(x=q1$hgb, y=q1$msofa_out, fuzzy=q1$tx, c=7, bwselect="mserd", all=T, covs=c(q1$AGE+q1$sex+q1$charlson+q1$sofa_co+q1$mv_co+q1$press_co+q1$tx_co))
+summary(mod_sofa_fuzzy_sb)
+
+# local quadratic
+mod_sofa_fuzzy_lq<-rdrobust(x=q1$hgb, y=q1$msofa_out, fuzzy=q1$tx, c=7, bwselect="msetwo", all=T, covs=c(q1$AGE+q1$sex+q1$charlson+q1$sofa_co+q1$mv_co+q1$press_co+q1$tx_co), p=2)
+summary(mod_sofa_fuzzy_lq)
+
+# global 3rd order polynomial
+mod_sofa_fuzzy_gp3<-rdrobust(x=q1$hgb, y=q1$msofa_out, fuzzy=q1$tx, c=7, h=c(7-min(q1$hgb), max(q1$hgb)-7), all=T, covs=c(q1$AGE+q1$sex+q1$charlson+q1$sofa_co+q1$mv_co+q1$press_co+q1$tx_co), p=3, kernel="uniform")
+summary(mod_sofa_fuzzy_gp3)
+
+# global 4th order polynomial
+mod_sofa_fuzzy_gp4<-rdrobust(x=q1$hgb, y=q1$msofa_out, fuzzy=q1$tx, c=7, h=c(7-min(q1$hgb), max(q1$hgb)-7), all=T, covs=c(q1$AGE+q1$sex+q1$charlson+q1$sofa_co+q1$mv_co+q1$press_co+q1$tx_co), p=4, kernel="uniform")
+summary(mod_sofa_fuzzy_gp4)
+
+# global 5th order polynomial
+mod_sofa_fuzzy_gp5<-rdrobust(x=q1$hgb, y=q1$msofa_out, fuzzy=q1$tx, c=7, h=c(7-min(q1$hgb), max(q1$hgb)-7), all=T, covs=c(q1$AGE+q1$sex+q1$charlson+q1$sofa_co+q1$mv_co+q1$press_co+q1$tx_co), p=5, kernel="uniform")
+summary(mod_sofa_fuzzy_gp5)
+
+# subgroup sepsis/no sepsis
+q1s<-q1 %>% filter(sep==1)
+q1ns<-q1 %>% filter(sep==0)
+
+mod_sofa_fuzzy_sepsis<-rdrobust(x=q1s$hgb, y=q1s$msofa_out, fuzzy=q1s$tx, c=7, bwselect="msetwo", all=T, covs=c(q1s$AGE+q1s$sex+q1s$charlson+q1s$sofa_co+q1s$mv_co+q1s$press_co+q1s$tx_co))
+
+mod_sofa_fuzzy_no_sepsis<-rdrobust(x=q1ns$hgb, y=q1ns$msofa_out, fuzzy=q1ns$tx, c=7, bwselect="msetwo", all=T, covs=c(q1ns$AGE+q1ns$sex+q1ns$charlson+q1ns$sofa_co+q1ns$mv_co+q1ns$press_co+q1ns$tx_co))
+
+summary(mod_sofa_fuzzy_sepsis)
+summary(mod_sofa_fuzzy_no_sepsis)
+
+interaction_sepsis=(1-pnorm(abs((mod_sofa_fuzzy_sepsis$coef[2]-mod_sofa_fuzzy_no_sepsis$coef[2])/sqrt((mod_sofa_fuzzy_sepsis$se[3]^2)+(mod_sofa_fuzzy_no_sepsis$se[3]^2)))))*2
+
+# subgroup cardiac icu/no cardiac icu
+q1c<-q1 %>% filter(cardiac_icu==1)
+q1nc<-q1 %>% filter(cardiac_icu==0)
+
+mod_sofa_fuzzy_cardiac_icu<-rdrobust(x=q1c$hgb, y=q1c$msofa_out, fuzzy=q1c$tx, c=7, bwselect="msetwo", all=T, covs=c(q1c$AGE+q1c$sex+q1c$charlson+q1c$sofa_co+q1c$mv_co+q1c$press_co+q1c$tx_co))
+
+mod_sofa_fuzzy_no_cardiac_icu<-rdrobust(x=q1nc$hgb, y=q1nc$msofa_out, fuzzy=q1nc$tx, c=7, bwselect="msetwo", all=T, covs=c(q1nc$AGE+q1nc$sex+q1nc$charlson+q1nc$sofa_co+q1nc$mv_co+q1nc$press_co+q1nc$tx_co))
+
+summary(mod_sofa_fuzzy_cardiac_icu)
+summary(mod_sofa_fuzzy_no_cardiac_icu)
+
+interaction_cardiac_icu=(1-pnorm(abs((mod_sofa_fuzzy_cardiac_icu$coef[2]-mod_sofa_fuzzy_no_cardiac_icu$coef[2])/sqrt((mod_sofa_fuzzy_cardiac_icu$se[3]^2)+(mod_sofa_fuzzy_no_cardiac_icu$se[3]^2)))))*2
+```
+
+# graphing
+```{r premier graphing}
+# covariable age
+q1age_co<-rdplot(y=q1$AGE, x=q1$hgb, c=7, shade=F, ci=F, p=1, h=mod_age$bws[1,], kernel="triangular")
+q1plot_q1age_co<-q1age_co$rdplot+
+  xlab("Hemoglobin - g/dL")+
+  ylab("Covariable age - years")+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+  geom_rect(aes(xmin=7-mod_age$bws[1,1], xmax=7+mod_age$bws[1,2], ymin=-Inf, ymax=+Inf), alpha=1/10)+
+  coord_cartesian(ylim=c(0,80), xlim=c(5,10))+
+  annotate(geom="text",label="A", x=5, y=80)+
+  ggtitle("")
+q1plot_q1age_co
+
+# covariable sex
+q1sex<-rdplot(y=q1$sex, x=q1$hgb, c=7, shade=F, ci=F, p=1, h=mod_sex$bws[1,], kernel="triangular")
+q1plot_q1sex<-q1sex$rdplot+
+  xlab("Hemoglobin - g/dL")+
+  ylab("Covariable Female sex - proportion")+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+  geom_rect(aes(xmin=7-mod_sex$bws[1,1], xmax=7+mod_sex$bws[1,2], ymin=-Inf, ymax=+Inf), alpha=1/10)+
+  coord_cartesian(ylim=c(0,1), xlim=c(5,10))+
+  annotate(geom="text",label="B", x=5, y=1)+
+  ggtitle("")
+q1plot_q1sex
+
+# covariable sofa
+q1sofa_co<-rdplot(y=q1$sofa_co, x=q1$hgb, c=7, shade=F, ci=F, p=1, h=mod_sofa_co$bws[1,], kernel="triangular")
+q1plot_q1sofa_co<-q1sofa_co$rdplot+
+  xlab("Hemoglobin - g/dL")+
+  ylab("Covariable SOFA score - points")+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+  geom_rect(aes(xmin=7-mod_sofa_co$bws[1,1], xmax=7+mod_sofa_co$bws[1,2], ymin=-Inf, ymax=+Inf), alpha=1/10)+
+  coord_cartesian(ylim=c(0,15), xlim=c(5,10))+
+  annotate(geom="text",label="C", x=5, y=15)+
+  ggtitle("")
+q1plot_q1sofa_co
+
+# covariable charlson
+q1charlson_co<-rdplot(y=q1$charlson, x=q1$hgb, c=7, shade=F, ci=F, p=1, h=mod_char$bws[1,], kernel="triangular")
+q1plot_q1charlson_co<-q1charlson_co$rdplot+
+  xlab("Hemoglobin - g/dL")+
+  ylab("Covariable Charlson score - points")+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+  geom_rect(aes(xmin=7-mod_char$bws[1,1], xmax=7+mod_char$bws[1,2], ymin=-Inf, ymax=+Inf), alpha=1/10)+
+  coord_cartesian(ylim=c(0,15), xlim=c(5,10))+
+  annotate(geom="text",label="D", x=5, y=15)+
+  ggtitle("")
+q1plot_q1charlson_co
+
+# covariable imv
+q1mv_co<-rdplot(y=q1$mv_co, x=q1$hgb, c=7, shade=F, ci=F, p=1, h=mod_mv_co$bws[1,], kernel="triangular")
+q1plot_q1mv_co<-q1mv_co$rdplot+
+  xlab("Hemoglobin - g/dL")+
+  ylab("Covariable use of invasive mechanical ventilation - proportion")+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+  geom_rect(aes(xmin=7-mod_mv_co$bws[1,1], xmax=7+mod_mv_co$bws[1,2], ymin=-Inf, ymax=+Inf), alpha=1/10)+
+  coord_cartesian(ylim=c(0,1), xlim=c(5,10))+
+  annotate(geom="text",label="E", x=5, y=1)+
+  ggtitle("")
+q1plot_q1mv_co
+
+# covariable vasopressors
+q1press_co<-rdplot(y=q1$press_co, x=q1$hgb, c=7, shade=F, ci=F, p=1, h=mod_press_co$bws[1,], kernel="triangular")
+q1plot_q1press_co<-q1press_co$rdplot+
+  xlab("Hemoglobin - g/dL")+
+  ylab("Covariable use of vasopressors - proportion")+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+  geom_rect(aes(xmin=7-mod_press_co$bws[1,1], xmax=7+mod_press_co$bws[1,2], ymin=-Inf, ymax=+Inf), alpha=1/10)+
+  coord_cartesian(ylim=c(0,1), xlim=c(5,10))+
+  annotate(geom="text",label="F", x=5, y=1)+
+  ggtitle("")
+q1plot_q1press_co
+
+# covariable transfusion
+q1pr_co<-rdplot(y=q1$tx_co, x=q1$hgb, c=7, shade=F, ci=F, p=1, h=mod_tx_co$bws[1,], kernel="triangular")
+q1plot_q1pr_co<-q1pr_co$rdplot+
+  xlab("Hemoglobin - g/dL")+
+  ylab("Covariable blood transfusion - proportion")+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+  geom_rect(aes(xmin=7-mod_tx_co$bws[1,1], xmax=7+mod_tx_co$bws[1,2], ymin=-Inf, ymax=+Inf), alpha=1/10)+
+  coord_cartesian(ylim=c(0,1), xlim=c(5,10))+
+  annotate(geom="text",label="G", x=5, y=1)+
+  ggtitle("")
+q1plot_q1pr_co
+
+# exposure
+q1pr_ex<-rdplot(y=q1$tx, x=q1$hgb, c=7, shade=F, ci=F, p=1, h=mod_tx$bws[1,], kernel="triangular")
+q1plot_pr_ex<-q1pr_ex$rdplot+
+  xlab("Hemoglobin - g/dL")+
+  ylab("Blood transfusion - proportion")+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+  geom_rect(aes(xmin=7-mod_tx$bws[1,1], xmax=7+mod_tx$bws[1,2], ymin=-Inf, ymax=+Inf), alpha=1/10)+
+  coord_cartesian(ylim=c(0,1), xlim=c(5,10))+
+  annotate(geom="text",label="E", x=5, y=1)+
+  ggtitle("")
+q1plot_pr_ex
+
+# outcome
+# main
+q1pr_out<-rdplot(y=q1$msofa_out, x=q1$hgb, c=7, shade=F, ci=F, p=1, h=mod_sofa_fuzzy$bws[1,], kernel="triangular")
+q1plot_pr_out<-q1pr_out$rdplot+
+  xlab("Hemoglobin - g/dL")+
+  ylab("Modified SOFA Score outcome - proportion")+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+  geom_rect(aes(xmin=7-mod_sofa_fuzzy$bws[1,1], xmax=7+mod_sofa_fuzzy$bws[1,2], ymin=-Inf, ymax=+Inf), alpha=1/10)+
+  coord_cartesian(ylim=c(0,25), xlim=c(5,10))+
+  annotate(geom="text",label="F", x=5, y=25)+
+  ggtitle("")
+q1plot_pr_out
+
+# sensitivities
+#hb
+q1pr_out_hb<-rdplot(y=q1$msofa_out, x=q1$hgb, c=7, shade=F, ci=F, p=1, h=mod_sofa_fuzzy_hb$bws[1,], kernel="triangular")
+q1plot_pr_out_hb<-q1pr_out_hb$rdplot+
+  xlab("Hemoglobin - g/dL")+
+  ylab("Modified SOFA Score outcome - proportion")+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+  geom_rect(aes(xmin=7-mod_sofa_fuzzy_hb$bws[1,1], xmax=7+mod_sofa_fuzzy_hb$bws[1,2], ymin=-Inf, ymax=+Inf), alpha=1/10)+
+  coord_cartesian(ylim=c(0,25), xlim=c(5,10))+
+  ggtitle("Half Bandwidth")+
+  annotate(geom="text",label="A", x=5, y=25)
+q1plot_pr_out_hb
+
+#db
+q1pr_out_db<-rdplot(y=q1$msofa_out, x=q1$hgb, c=7, shade=F, ci=F, p=1, h=mod_sofa_fuzzy_db$bws[1,], kernel="triangular")
+q1plot_pr_out_db<-q1pr_out_db$rdplot+
+  xlab("Hemoglobin - g/dL")+
+  ylab("Modified SOFA Score outcome - proportion")+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+  geom_rect(aes(xmin=7-mod_sofa_fuzzy_db$bws[1,1], xmax=7+mod_sofa_fuzzy_db$bws[1,2], ymin=-Inf, ymax=+Inf), alpha=1/10)+
+  coord_cartesian(ylim=c(0,25), xlim=c(5,10))+
+  ggtitle("Double Bandwidth")+
+  annotate(geom="text",label="B", x=5, y=25)
+q1plot_pr_out_db
+
+#sb
+q1pr_out_sb<-rdplot(y=q1$msofa_out, x=q1$hgb, c=7, shade=F, ci=F, p=1, h=mod_sofa_fuzzy_sb$bws[1,], kernel="triangular")
+q1plot_pr_out_sb<-q1pr_out_sb$rdplot+
+  xlab("Hemoglobin - g/dL")+
+  ylab("Modified SOFA Score outcome - proportion")+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+  geom_rect(aes(xmin=7-mod_sofa_fuzzy_sb$bws[1,1], xmax=7+mod_sofa_fuzzy_sb$bws[1,2], ymin=-Inf, ymax=+Inf), alpha=1/10)+
+  coord_cartesian(ylim=c(0,25), xlim=c(5,10))+
+  ggtitle("Symmetric Bandwidth")+
+  annotate(geom="text",label="C", x=5, y=25)
+q1plot_pr_out_sb
+
+#lq
+q1pr_out_lq<-rdplot(y=q1$msofa_out, x=q1$hgb, c=7, shade=F, ci=F, p=2, h=mod_sofa_fuzzy_lq$bws[1,], kernel="triangular")
+q1plot_pr_out_lq<-q1pr_out_lq$rdplot+
+  xlab("Hemoglobin - g/dL")+
+  ylab("Modified SOFA Score outcome - proportion")+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+  geom_rect(aes(xmin=7-mod_sofa_fuzzy_lq$bws[1,1], xmax=7+mod_sofa_fuzzy_lq$bws[1,2], ymin=-Inf, ymax=+Inf), alpha=1/10)+
+  coord_cartesian(ylim=c(0,25), xlim=c(5,10))+
+  ggtitle("Local Quadratic Regression")+
+  annotate(geom="text",label="D", x=5, y=25)
+q1plot_pr_out_lq
+
+#gp3
+q1pr_out_gp3<-rdplot(y=q1$msofa_out, x=q1$hgb, c=7, shade=F, ci=F, p=3, h=mod_sofa_fuzzy_gp3$bws[1,], kernel="uniform")
+q1plot_pr_out_gp3<-q1pr_out_gp3$rdplot+
+  xlab("Hemoglobin - g/dL")+
+  ylab("Modified SOFA Score outcome - proportion")+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+  geom_rect(aes(xmin=7-mod_sofa_fuzzy_gp3$bws[1,1], xmax=7+mod_sofa_fuzzy_gp3$bws[1,2], ymin=-Inf, ymax=+Inf), alpha=1/10)+
+  coord_cartesian(ylim=c(0,25), xlim=c(5,10))+
+  ggtitle("3rd Degree Global Polynomial")+
+  annotate(geom="text",label="E", x=5, y=25)
+q1plot_pr_out_gp3
+
+#gp4
+q1pr_out_gp4<-rdplot(y=q1$msofa_out, x=q1$hgb, c=7, shade=F, ci=F, p=4, h=mod_sofa_fuzzy_gp4$bws[1,], kernel="uniform")
+q1plot_pr_out_gp4<-q1pr_out_gp4$rdplot+
+  xlab("Hemoglobin - g/dL")+
+  ylab("Modified SOFA Score outcome - proportion")+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+  geom_rect(aes(xmin=7-mod_sofa_fuzzy_gp4$bws[1,1], xmax=7+mod_sofa_fuzzy_gp4$bws[1,2], ymin=-Inf, ymax=+Inf), alpha=1/10)+
+  coord_cartesian(ylim=c(0,25), xlim=c(5,10))+
+  ggtitle("4th Degree Global Polynomial")+
+  annotate(geom="text",label="F", x=5, y=25)
+q1plot_pr_out_gp4
+
+#gp5
+q1pr_out_gp5<-rdplot(y=q1$msofa_out, x=q1$hgb, c=7, shade=F, ci=F, p=5, h=mod_sofa_fuzzy_gp5$bws[1,], kernel="uniform")
+q1plot_pr_out_gp5<-q1pr_out_gp5$rdplot+
+  xlab("Hemoglobin - g/dL")+
+  ylab("Modified SOFA Score outcome - proportion")+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+  geom_rect(aes(xmin=7-mod_sofa_fuzzy_gp5$bws[1,1], xmax=7+mod_sofa_fuzzy_gp5$bws[1,2], ymin=-Inf, ymax=+Inf), alpha=1/10)+
+  coord_cartesian(ylim=c(0,25), xlim=c(5,10))+
+  ggtitle("5th Degree Global Polynomial")+
+  annotate(geom="text",label="G", x=5, y=25)
+q1plot_pr_out_gp5
+```
+
+# histogram
+```{r histogram}
+m1<-m1 %>% mutate(color=factor(if_else(hgb<7,1,0)))
+m1hist<-ggplot(m1, aes(x=hgb, fill=color))+geom_histogram(binwidth=0.2)+
+  theme_bw()+
+  xlab("Hemoglobin - g/dL")+
+  ylab("Count")+
+  theme(legend.position = "none")+
+  coord_cartesian(xlim=c(5,10))+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+  annotate(geom="text",label="A", x=5, y=450)
+
+e1<-e1 %>% mutate(color=factor(if_else(hgb<7,1,0)))
+e1hist<-ggplot(e1, aes(x=hgb, fill=color))+geom_histogram(binwidth=0.2)+
+  theme_bw()+
+  xlab("Hemoglobin - g/dL")+
+  ylab("Count")+
+  theme(legend.position = "none")+
+  coord_cartesian(xlim=c(5,10))+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+  annotate(geom="text",label="B", x=5, y=500)
+
+q1<-q1 %>% mutate(color=factor(if_else(hgb<7,1,0)))
+q1hist<-ggplot(q1, aes(x=hgb, fill=color))+geom_histogram(binwidth=0.2)+
+  theme_bw()+
+  xlab("Hemoglobin - g/dL")+
+  ylab("Count")+
+  theme(legend.position = "none")+
+  coord_cartesian(xlim=c(5,10))+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+  annotate(geom="text",label="C", x=5, y=3000)
+
+fige4<-ggarrange(m1hist, e1hist, q1hist, nrow=3, ncol=1, labels=c("        MIMIC-IV","          eICU","          Premier"), hjust=-0.25, vjust=2, heights=2)
+ggexport(fige4, filename="hgb_rdd_fige4.jpeg", width=1000, height=1000)
+```
+
+# traditional table 1s
+```{r table1}
+my.render.cont <- function(x) {
+  with(stats.apply.rounding(stats.default(x, ), digits = 2),
+       c("",
+         "median (Q1-Q3)" =
+           sprintf(paste("%s (",Q1,"- %s)"), MEDIAN,Q3)))
+}
+  
+table1(~ AGE + factor(sex) + sofa_co + charlson + factor(mv_co) + factor(press_co) + factor(tx_co) | factor(tx), data=m1, render.continuous=my.render.cont)
+table1(~ AGE + factor(sex) + sofa_co + charlson + factor(mv_co) + factor(press_co) + factor(tx_co) | factor(tx), data=e1, render.continuous=my.render.cont)
+table1(~ AGE + factor(sex) + sofa_co + charlson + factor(mv_co) + factor(press_co) + factor(tx_co) | factor(tx), data=q1, render.continuous=my.render.cont)
+```
+
+
+# making combined faceted plots
+```{r faceted plots}
+# exposure and primary outcome
+fig1<-ggarrange(m1plot_pr_ex, m1plot_pr_out, e1plot_pr_ex, e1plot_pr_out, q1plot_pr_ex, q1plot_pr_out, nrow=3, ncol=2, labels=c("MIMIC-IV - RBC transfusion","MIMIC-IV - Modified SOFA score","eICU - RBC transfusion","eICU - Modified SOFA score","Premier - RBC transfusion","Premier - Modified SOFA score"))
+ggexport(fig1, filename="hgb_rdd_fig1.jpeg", width=1000, height=1000)
+
+# covariables
+fige5<-ggarrange(m1plot_m1age_co, m1plot_m1sex, m1plot_m1sofa_co, m1plot_m1charlson_co, m1plot_m1mv_co, m1plot_m1press_co, m1plot_m1pr_co, nrow=3, ncol=3)
+ggexport(fige5, filename="hgb_rdd_fige5.jpeg", width=1000, height=1000)
+
+fige6<-ggarrange(e1plot_e1age_co, e1plot_e1sex, e1plot_e1sofa_co, e1plot_e1charlson_co, e1plot_e1mv_co, e1plot_e1press_co, e1plot_e1pr_co, nrow=3, ncol=3)
+ggexport(fige6, filename="hgb_rdd_fige6.jpeg", width=1000, height=1000)
+
+fige7<-ggarrange(q1plot_q1age_co, q1plot_q1sex, q1plot_q1sofa_co, q1plot_q1charlson_co, q1plot_q1mv_co, q1plot_q1press_co, q1plot_q1pr_co, nrow=3, ncol=3)
+ggexport(fige7, filename="hgb_rdd_fige7.jpeg", width=1000, height=1000)
+
+# sensitivity analyses
+fige8<-ggarrange(m1plot_pr_out_hb, m1plot_pr_out_db, m1plot_pr_out_sb, m1plot_pr_out_lq, m1plot_pr_out_gp3, m1plot_pr_out_gp4, m1plot_pr_out_gp5, nrow=3, ncol=3)
+ggexport(fige8, filename="hgb_rdd_fige8.jpeg", width=1000, height=1000)
+
+fige9<-ggarrange(e1plot_pr_out_hb, e1plot_pr_out_db, e1plot_pr_out_sb, e1plot_pr_out_lq, e1plot_pr_out_gp3, e1plot_pr_out_gp4, e1plot_pr_out_gp5, nrow=3, ncol=3)
+ggexport(fige9, filename="hgb_rdd_fige9.jpeg", width=1000, height=1000)
+
+fige10<-ggarrange(q1plot_pr_out_hb, q1plot_pr_out_db, q1plot_pr_out_sb, q1plot_pr_out_lq, q1plot_pr_out_gp3, q1plot_pr_out_gp4, q1plot_pr_out_gp5, nrow=3, ncol=3)
+ggexport(fige10, filename="hgb_rdd_fige10.jpeg", width=1000, height=1000)
+```
+
+# meta analyize
+```{r metaanalyze}
+z1<-bind_rows(
+  e1 %>% select(AGE, sex, charlson, hgb, sofa_co, mv_co, press_co, tx_co, tx, msofa_out) %>% mutate(cohort="eicu"),
+  m1 %>% select(AGE, sex, charlson, hgb, sofa_co, mv_co, press_co, tx_co, tx, msofa_out) %>% mutate(cohort="mimic"),
+  q1 %>% select(AGE, sex, charlson, hgb, sofa_co, mv_co, press_co, tx_co, tx, msofa_out) %>% mutate(cohort="premier"),
+)
+
+z1$sofa_co[is.na(z1$sofa_co)]<-0
+
+
+meta_tx<-rdrobust(x=z1$hgb, y=z1$tx, c=7, bwselect="msetwo", all=T, cluster=z1$cohort)
+
+meta_msofa<-rdrobust(x=z1$hgb, y=z1$msofa_out, fuzzy=z1$tx, c=7, bwselect="msetwo", all=T, covs=c(z1$AGE+z1$sex+z1$charlson+z1$sofa_co+z1$mv_co+z1$press_co+z1$tx_co), cluster=z1$cohort)
+
+summary(meta_tx)
+
+summary(meta_msofa)
+
+```
+
