@@ -1,4 +1,4 @@
--- Red blood cell transfusion at a hemoglobin threshold of seven g/dL in critically ill patients: A target trial emulation 
+-- Red blood cell transfusion at a hemoglobin threshold of seven g/dL in critically ill patients:  A regression discontinuity study 
 -- This code includes steps to extract the datasets from the MIMIC-IV (using Google BigQuery) and eICU (using PostgreSQL) databases  
 -- In order for these cohorts to be uploaded into R appropriately with the accompianing analysis code for RMarkdown, please save each SQL statement result as a CSV file in the same directory as the location of the Rmarkdown docuement with a name that matches the appropriate dataset (e.g., save the results from the icustay_detail SQL code block as icustay_detail.csv) 
 -- Note: much of the code comes from the concepts located in the github pages of MIMIC-IV (https://github.com/MIT-LCP/mimic-iv) and eICU (https://github.com/MIT-LCP/eicu-code)
