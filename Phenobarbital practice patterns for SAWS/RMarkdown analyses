@@ -1,0 +1,672 @@
+---
+title: "phenobarbital etoh withdrawal premier"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(comorbidity)
+library(rdrobust)
+library(table1)
+library(data.table)
+library(ggpubr)
+library(lme4)
+library(zoo)
+library(ggrepel)
+library(splines)
+```
+
+# import data tables  
+```{r import}
+icd_lu <- fread("/project/walkelab/Premier Raw Data/Full cohort/bu_icdcode.txt.gz", 
+    sep="|")
+
+bill_lu <- fread("/project/walkelab/Premier Raw Data/Full cohort/bu_chgmstr.txt.gz", 
+    sep="|")
+
+prov<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_providers.txt.gz", sep="|")
+
+physpec<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_physpec.txt.gz", sep="|")
+
+icd_diag20161<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20161_paticd_diag.txt.gz", sep="|") %>% mutate(year=2016)
+icd_diag20162<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20162_paticd_diag.txt.gz", sep="|") %>% mutate(year=2016)
+icd_diag20163<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20163_paticd_diag.txt.gz", sep="|") %>% mutate(year=2016)
+icd_diag20164<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20164_paticd_diag.txt.gz", sep="|") %>% mutate(year=2016)
+icd_diag20171<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20171_paticd_diag.txt.gz", sep="|") %>% mutate(year=2017)
+icd_diag20172<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20172_paticd_diag.txt.gz", sep="|") %>% mutate(year=2017)
+icd_diag20173<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20173_paticd_diag.txt.gz", sep="|") %>% mutate(year=2017)
+icd_diag20174<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20174_paticd_diag.txt.gz", sep="|") %>% mutate(year=2017)
+icd_diag20181<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20181_paticd_diag.txt.gz", sep="|") %>% mutate(year=2018)
+icd_diag20182<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20182_paticd_diag.txt.gz", sep="|") %>% mutate(year=2018)
+icd_diag20183<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20183_paticd_diag.txt.gz", sep="|") %>% mutate(year=2018)
+icd_diag20184<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20184_paticd_diag.txt.gz", sep="|") %>% mutate(year=2018)
+icd_diag20191<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20191_paticd_diag.txt.gz", sep="|") %>% mutate(year=2019)
+icd_diag20192<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20192_paticd_diag.txt.gz", sep="|") %>% mutate(year=2019)
+icd_diag20193<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20193_paticd_diag.txt.gz", sep="|") %>% mutate(year=2019)
+icd_diag20194<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20194_paticd_diag.txt.gz", sep="|") %>% mutate(year=2019)
+icd_diag20201<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20201_paticd_diag.txt.gz", sep="|") %>% mutate(year=2020)
+icd_diag20202<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20202_paticd_diag.txt.gz", sep="|") %>% mutate(year=2020)
+icd_diag20203<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20203_paticd_diag.txt.gz", sep="|") %>% mutate(year=2020)
+icd_diag20204<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20204_paticd_diag.txt.gz", sep="|") %>% mutate(year=2020)
+
+demo20161<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20161_patdemo.txt.gz", sep="|") %>% mutate(year=2016)
+demo20162<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20162_patdemo.txt.gz", sep="|") %>% mutate(year=2016)
+demo20163<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20163_patdemo.txt.gz", sep="|") %>% mutate(year=2016)
+demo20164<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20164_patdemo.txt.gz", sep="|") %>% mutate(year=2016)
+demo20171<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20171_patdemo.txt.gz", sep="|") %>% mutate(year=2017)
+demo20172<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20172_patdemo.txt.gz", sep="|") %>% mutate(year=2017)
+demo20173<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20173_patdemo.txt.gz", sep="|") %>% mutate(year=2017)
+demo20174<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20174_patdemo.txt.gz", sep="|") %>% mutate(year=2017)
+demo20181<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20181_patdemo.txt.gz", sep="|") %>% mutate(year=2018)
+demo20182<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20182_patdemo.txt.gz", sep="|") %>% mutate(year=2018)
+demo20183<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20183_patdemo.txt.gz", sep="|") %>% mutate(year=2018)
+demo20184<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20184_patdemo.txt.gz", sep="|") %>% mutate(year=2018)
+demo20191<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20191_patdemo.txt.gz", sep="|") %>% mutate(year=2019)
+demo20192<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20192_patdemo.txt.gz", sep="|") %>% mutate(year=2019)
+demo20193<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20193_patdemo.txt.gz", sep="|") %>% mutate(year=2019)
+demo20194<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20194_patdemo.txt.gz", sep="|") %>% mutate(year=2019)
+demo20201<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20201_patdemo.txt.gz", sep="|") %>% mutate(year=2020)
+demo20202<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20202_patdemo.txt.gz", sep="|") %>% mutate(year=2020)
+demo20203<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20203_patdemo.txt.gz", sep="|") %>% mutate(year=2020)
+demo20204<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20204_patdemo.txt.gz", sep="|") %>% mutate(year=2020)
+```
+
+
+# inclusion/exclusion wrangling
+```{r wrangling1}
+# icd_diag binding
+icd_diag<-bind_rows(
+    icd_diag20161, icd_diag20162, icd_diag20163, icd_diag20164,
+    icd_diag20171, icd_diag20172, icd_diag20173, icd_diag20174,
+    icd_diag20181, icd_diag20182, icd_diag20183, icd_diag20184,
+    icd_diag20191, icd_diag20192, icd_diag20193, icd_diag20194,
+    icd_diag20201, icd_diag20202, icd_diag20203, icd_diag20204)
+
+# alcohol withdrawal diagnosis
+etoh_lu<-icd_lu %>%
+  filter(ICD_CODE %in% c("F10.130", "F10.131", "F10.132", "F10.139", "F10.230", "F10.231", "F10.232", "F10.239", "F10.930", "F10.931", "F10.932", "F10.939"))
+
+etoh<-icd_diag %>%
+  inner_join(etoh_lu)
+
+# poa
+etoh1<- etoh %>%
+  filter(ICD_PRI_SEC=="A"|ICD_PRI_SEC=="P") %>%
+  group_by(PAT_KEY) %>%
+  slice(1L)
+
+# demo binding and keeping hospitals with continious data
+demo<-bind_rows(
+    demo20161, demo20162, demo20163, demo20164,
+    demo20171, demo20172, demo20173, demo20174,
+    demo20181, demo20182, demo20183, demo20184,
+    demo20191, demo20192, demo20193, demo20194,
+    demo20201, demo20202, demo20203, demo20204)
+
+demo<-demo %>%
+  mutate(count=1) %>%
+  group_by(PROV_ID, year) %>%
+  summarise(count=max(count)) %>%
+  ungroup() %>%
+  group_by(PROV_ID) %>%
+  summarise(allfiveyears=sum(count)) %>%
+  filter(allfiveyears==5) %>%
+  left_join(demo)
+
+ds<-etoh1 %>%
+  inner_join(demo)
+
+withdrawal_pt<-ds %>%
+  mutate(withdrawal=1) %>%
+  select(PAT_KEY, withdrawal)
+
+bill20161<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20161_patbill.txt.gz", sep="|") %>% mutate(year=2016) %>% inner_join(withdrawal_pt)
+bill20162<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20162_patbill.txt.gz", sep="|") %>% mutate(year=2016) %>% inner_join(withdrawal_pt)
+bill20163<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20163_patbill.txt.gz", sep="|") %>% mutate(year=2016) %>% inner_join(withdrawal_pt)
+bill20164<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20164_patbill.txt.gz", sep="|") %>% mutate(year=2016) %>% inner_join(withdrawal_pt)
+bill20171<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20171_patbill.txt.gz", sep="|") %>% mutate(year=2017) %>% inner_join(withdrawal_pt)
+bill20172<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20172_patbill.txt.gz", sep="|") %>% mutate(year=2017) %>% inner_join(withdrawal_pt)
+bill20173<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20173_patbill.txt.gz", sep="|") %>% mutate(year=2017) %>% inner_join(withdrawal_pt)
+bill20174<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20174_patbill.txt.gz", sep="|") %>% mutate(year=2017) %>% inner_join(withdrawal_pt)
+bill20181<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20181_patbill.txt.gz", sep="|") %>% mutate(year=2018) %>% inner_join(withdrawal_pt)
+bill20182<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20182_patbill.txt.gz", sep="|") %>% mutate(year=2018) %>% inner_join(withdrawal_pt)
+bill20183<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20183_patbill.txt.gz", sep="|") %>% mutate(year=2018) %>% inner_join(withdrawal_pt)
+bill20184<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20184_patbill.txt.gz", sep="|") %>% mutate(year=2018) %>% inner_join(withdrawal_pt)
+bill20191<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20191_patbill.txt.gz", sep="|") %>% mutate(year=2019) %>% inner_join(withdrawal_pt)
+bill20192<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20192_patbill.txt.gz", sep="|") %>% mutate(year=2019) %>% inner_join(withdrawal_pt)
+bill20193<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20193_patbill.txt.gz", sep="|") %>% mutate(year=2019) %>% inner_join(withdrawal_pt)
+bill20194<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20194_patbill.txt.gz", sep="|") %>% mutate(year=2019) %>% inner_join(withdrawal_pt)
+bill20201<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20201_patbill.txt.gz", sep="|") %>% mutate(year=2020) %>% inner_join(withdrawal_pt)
+bill20202<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20202_patbill.txt.gz", sep="|") %>% mutate(year=2020) %>% inner_join(withdrawal_pt)
+bill20203<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20203_patbill.txt.gz", sep="|") %>% mutate(year=2020) %>% inner_join(withdrawal_pt)
+bill20204<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20204_patbill.txt.gz", sep="|") %>% mutate(year=2020) %>% inner_join(withdrawal_pt)
+
+bill<-bind_rows(
+    bill20161, bill20162, bill20163, bill20164,
+    bill20171, bill20172, bill20173, bill20174,
+    bill20181, bill20182, bill20183, bill20184,
+    bill20191, bill20192, bill20193, bill20194,
+    bill20201, bill20202, bill20203, bill20204)
+
+#icu or stepdown on day 1
+icu_lu<- bill_lu %>%
+  filter((CLIN_SUM_DESC=="R&B ICU" & !STD_CHG_DESC %like% "PSYCH" & !STD_CHG_DESC %like% "NURSERY" * !STD_CHG_DESC %like% "PEDIATRIC") | (CLIN_SUM_DESC=="R&B STEP DOWN" & !STD_CHG_DESC %like% "PSYCH" & !STD_CHG_DESC %like% "NURSERY" * !STD_CHG_DESC %like% "PEDIATRIC")) %>%
+  mutate(icu=if_else(CLIN_SUM_DESC=="R&B ICU",1,0))
+
+icu<- bill %>%
+  inner_join(icu_lu) %>%
+  filter(SERV_DAY==1) %>%
+  group_by(PAT_KEY, SERV_DAY) %>%
+  summarise(icu=max(icu))
+
+# patients with alcohol withdrawal and admitted to icu on day 1
+ds1<-ds %>%
+  inner_join(icu %>% filter(icu==1))
+
+# medications on first day
+meds_lu<-bill_lu %>%
+  mutate(barb=if_else(PROD_NAME_METH_DESC %in% c("PHENOBARB ORAL","PHENOBARB PARENTERAL"),1,0),
+         long_benzo=if_else(PROD_NAME_METH_DESC %in% c("DIAZEPAM ORAL", "DIAZEPAM PARENTERAL", "CHLORDIAZEPOXIDE ORAL", "CHLORDIAZEPOXIDE PARENTERAL"),1,0),
+         inter_benzo=if_else(PROD_NAME_METH_DESC %in% c("LORAZEPAM ORAL", "LORAZEPAM PARENTERAL"),1,0),
+         short_benzo=if_else(PROD_NAME_METH_DESC %in% c("MIDAZOLAM ORAL", "MIDAZOLAM PARENTERAL"),1,0),
+         dex=if_else(PROD_NAME_METH_DESC %in% c("DEXMEDETOMIDINE PARENTERAL"),1,0),
+         prop=if_else(PROD_NAME_METH_DESC %in% c("PROPOFOL PARENTERAL"),1,0),
+         halo=if_else(PROD_NAME_METH_DESC %in% c("HALOPERIDOL ORAL", "HALOPERIDOL PARENTERAL", "QUETIAPINE FUM ORAL"),1,0),
+         valproic=if_else(PROD_NAME_METH_DESC %in% c("VALPROIC ACID PARENTERAL", "VALPROIC ACID ORAL","CARBAMAZEPINE ORAL","GABAPENTIN ORAL"),1,0),
+         clon=if_else(PROD_NAME_METH_DESC %in% c("CLONIDINE ORAL"),1,0)) %>%
+  filter(barb==1|long_benzo==1|inter_benzo==1|short_benzo==1|dex==1|prop==1|halo==1|clon==1|valproic==1)
+meds<-bill %>%
+  filter(SERV_DAY==1) %>%
+  inner_join(meds_lu) %>%
+  mutate(phenobarb_dose=
+           if_else(STD_CHG_DESC %in% c("PHENOBARB ELX 20MG/5ML 3.75ML", "PHENOBARB ELX 15MG/5ML 5ML", "PHENOBARB TAB 15MG", "PHENOBARB TAB 16.2MG"),15*STD_QTY,
+                   if_else(STD_CHG_DESC %in% c("PHENOBARB ELX 20MG/5ML 5ML"), 20*STD_QTY,
+                           if_else(STD_CHG_DESC %in% c("PHENOBARB ELX 15MG/5ML 10ML", "PHENOBARB INJ 30MG/ML 1ML", "PHENOBARB TAB 30MG", "PHENOBARB TAB 32.4MG", "PHENOBARB ELX 20MG/5ML 7.5ML"),30*STD_QTY,
+                                   if_else(STD_CHG_DESC %in% c("PHENOBARB ELX 15MG/5ML 20ML", "PHENOBARB ELX 20MG/5ML 15ML", "PHENOBARB INJ 60MG/ML 1ML", "PHENOBARB TAB 60MG", "PHENOBARB VL 65MG/ML 1ML", "PHENOBARB TAB 64.8MG"), 60*STD_QTY,
+                                           if_else(STD_CHG_DESC %in% c("PHENOBARB ELX 20MG/5ML 30ML", "*PHENOBARB AMP 130MG/ML 1ML", "PHENOBARB INJ 130MG/ML 1ML"), 130*STD_QTY,
+                                                   if_else(STD_CHG_DESC %in% c( "PHENOBARB ELX 15MG/5ML 30ML","PHENOBARB TAB 100MG", "PHENOBARB TAB 97.2MG"), 100*STD_QTY,
+                                                           0))))))) %>%
+  group_by(PAT_KEY) %>%
+  summarise(barb=max(barb), long_benzo=max(long_benzo), inter_benzo=max(inter_benzo), short_benzo=max(short_benzo), dex=max(dex), prop=max(prop), halo=max(halo), valproic=max(valproic), clon=max(clon), phenobarb_dose=sum(phenobarb_dose)) %>%
+  mutate(benzo=if_else(long_benzo==1|inter_benzo==1|short_benzo==1,1,0),
+         alpha=if_else(dex==1|clon==1,1,0))
+ds2<-ds1 %>%
+  left_join(meds)
+ds2$barb[is.na(ds2$barb)|is.na(ds2$phenobarb_dose)]<-0
+ds2$long_benzo[is.na(ds2$long_benzo)]<-0
+ds2$inter_benzo[is.na(ds2$inter_benzo)]<-0
+ds2$short_benzo[is.na(ds2$short_benzo)]<-0
+ds2$dex[is.na(ds2$dex)]<-0
+ds2$prop[is.na(ds2$prop)]<-0
+ds2$halo[is.na(ds2$halo)]<-0
+ds2$valproic[is.na(ds2$valproic)]<-0
+ds2$clon[is.na(ds2$clon)]<-0
+ds2$benzo[is.na(ds2$benzo)]<-0
+ds2$alpha[is.na(ds2$alpha)]<-0
+
+# mv status
+mv_lu<- bill_lu %>%
+    filter(STD_CHG_CODE=="270270013950000" | STD_CHG_CODE=="270270057050000" | STD_CHG_CODE=="270270086600000" | STD_CHG_CODE=="270270088900000" | STD_CHG_CODE=="270270089300000" | STD_CHG_CODE=="290290093620000" | STD_CHG_CODE=="410412946560000" | STD_CHG_CODE=="410412946560001" | STD_CHG_CODE=="410412946570000" | STD_CHG_CODE=="410412946570004" | STD_CHG_CODE=="410412946570005"  | STD_CHG_CODE=="410412946570007" | STD_CHG_CODE=="410412946570009"  | STD_CHG_CODE=="970976946560000" |  STD_CHG_CODE=="970976946570000") %>%
+  mutate(mv=1)
+mv<-bill %>%
+  filter(SERV_DAY==1) %>%
+  inner_join(mv_lu) %>%
+  group_by(PAT_KEY) %>%
+  summarise(mv=max(mv))
+ds3<-ds2 %>%
+  left_join(mv)
+ds3$mv[is.na(ds3$mv)]<-0
+
+
+# hospital factors
+ds4<-ds3 %>%
+  left_join(prov)
+
+# adults
+ds5<- ds4 %>%
+  filter(AGE>=18)
+
+# not mechanically ventilated on day 1 and not discharged on day 1
+ds6<-ds5 %>%
+  filter(mv==0)  %>%
+  filter(LOS>1)
+
+# not admitted from outside facility
+ds6a<-ds6 %>%
+  filter(ADM_SOURCE!="4")
+
+# one admission per patient (take first admission)
+ds7<- ds6a %>%
+  group_by(MEDREC_KEY) %>%
+  arrange(ADM_MON, .by_group=T) %>%
+  slice(1L)
+
+# hospitals with at least 25 encounters
+ds8<- ds7 %>%
+  mutate(count=1) %>%
+  group_by(PROV_ID) %>%
+  summarise(count=sum(count)) %>%
+  filter(count>=25) %>%
+  rename(hosp_count=count) %>%
+  left_join(ds7) %>%
+  mutate(death=if_else(DISC_STATUS==20,1,0))
+
+# mv outcome rates  
+mv_out<-bill %>%
+  filter(SERV_DAY>1) %>%
+  inner_join(mv_lu) %>%
+  group_by(PAT_KEY) %>%
+  summarise(mv_out=max(mv))
+ds9<-ds8 %>%
+  left_join(mv_out)
+ds9$mv_out[is.na(ds9$mv_out)]<-0
+
+#elixhauser comorbidities
+elix<-ds9 %>%
+  select(PAT_KEY) %>%
+  left_join(icd_diag %>%
+              mutate(icdcode=str_replace_all(ICD_CODE, "[[:punct:]]", "")) %>%
+              filter(ICD_POA=="Y")) 
+elix1<- elix %>%
+  filter(!is.na(icdcode)) %>%
+  as.data.frame() %>%
+  comorbidity(code="icdcode", id="PAT_KEY", score="elixhauser", assign0=T, icd="icd10") %>%
+  select(PAT_KEY, elix=score, alcohol, drug)
+ds10<-ds9 %>%
+  left_join(elix1)
+ds10$elix[is.na(ds10$elix)]<-0
+ds10$alcohol[is.na(ds10$alcohol)]<-0
+ds10$drug[is.na(ds10$drug)]<-0
+
+# organ dysfunctions (dombrovskiy)
+dombrovskiy_lu <- icd_lu %>%
+  mutate(cardiovascular_dombrovskiy=if_else(ICD_CODE %in% c("R57.9","R57.0","R65.21","R57.1","R57.8","I95.1","I95.89","I95.9","R03.1","I46.9"),1,0),
+         respiratory_dombrovskiy=if_else(ICD_CODE %in% c("J96.01","J96.02","J96.90","J96.91","J96.92","J80","R06.03",
+"R06.00","R06.09","R06.3","R06.8.3","R06.89","R09.2"),1,0),
+         neurologic_dombrovskiy=if_else(ICD_CODE %in% c("G93.40","F05","G93.1", "R40.20", "R40.1"),1,0),
+         hematologic_dombrovskiy=if_else(ICD_CODE %in% c("D69.59","D69.6","D65","D68.8","D68.9"),1,0),
+         hepatic_dombrovskiy=if_else(ICD_CODE %in% c("K72.00","K72.01","K72.91","K76.2", "K76.3"),1,0),
+         renal_dombrovskiy=if_else(ICD_CODE %in% c("N17.0","N17.1","N17.2","N17.8","N17.9"),1,0)) %>%
+  filter(cardiovascular_dombrovskiy==1|respiratory_dombrovskiy==1|neurologic_dombrovskiy==1|hematologic_dombrovskiy==1|hepatic_dombrovskiy==1|renal_dombrovskiy==1)
+dombrovskiy_diag<-ds10 %>%
+  select(PAT_KEY) %>%
+  left_join(icd_diag) %>%
+  filter(ICD_POA=="Y") %>%
+  inner_join(dombrovskiy_lu) %>%
+  dplyr::select(PAT_KEY, cardiovascular_dombrovskiy, respiratory_dombrovskiy, neurologic_dombrovskiy, hematologic_dombrovskiy, hepatic_dombrovskiy, renal_dombrovskiy)
+dombrovskiy<-dombrovskiy_diag %>%
+  group_by(PAT_KEY) %>%
+  summarise(cardiovascular_dombrovskiy=max(cardiovascular_dombrovskiy), respiratory_dombrovskiy=max(respiratory_dombrovskiy), neurologic_dombrovskiy=max(neurologic_dombrovskiy), hematologic_dombrovskiy=max(hematologic_dombrovskiy), hepatic_dombrovskiy=max(hepatic_dombrovskiy), renal_dombrovskiy=max(renal_dombrovskiy)) %>% mutate(dombrovskiy=cardiovascular_dombrovskiy+respiratory_dombrovskiy+neurologic_dombrovskiy+hematologic_dombrovskiy+hepatic_dombrovskiy+renal_dombrovskiy)
+ds11<-ds10 %>%
+  left_join(dombrovskiy)
+ds11$cardiovascular_dombrovskiy[is.na(ds11$cardiovascular_dombrovskiy)]<-0
+ds11$respiratory_dombrovskiy[is.na(ds11$respiratory_dombrovskiy)]<-0
+ds11$neurologic_dombrovskiy[is.na(ds11$neurologic_dombrovskiy)]<-0
+ds11$hematologic_dombrovskiy[is.na(ds11$hematologic_dombrovskiy)]<-0
+ds11$hepatic_dombrovskiy[is.na(ds11$hepatic_dombrovskiy)]<-0
+ds11$renal_dombrovskiy[is.na(ds11$renal_dombrovskiy)]<-0
+
+# barb rates per hospital
+hosp<- ds11 %>%
+  mutate(count=1) %>%
+  group_by(PROV_ID) %>%
+  summarise(barb=sum(barb), long_benzo=sum(long_benzo), inter_benzo=sum(inter_benzo), short_benzo=sum(short_benzo), dex=sum(dex), prop=sum(prop), halo=sum(halo), count=sum(count),death=sum(death),mv_out=sum(mv_out),benzo=sum(benzo), phenobarb_dose=sum(phenobarb_dose)) %>%
+  mutate(barb_rate=barb/count, long_benzo_rate=long_benzo/count, inter_benzo_rate=inter_benzo/count, short_benzo_rate=short_benzo/count, dex_rate=dex/count, prop_rate=prop/count, halo_rate=halo/count, death_rate=death/count, mv_out_rate=mv_out/count, benzo_rate=benzo/count, phenobarb_dose_rate=phenobarb_dose/count)
+hosp1<- hosp %>%
+  filter(barb_rate>0)
+
+# adding back barbiturate rate
+d<-ds11 %>%
+  left_join(hosp[,c("PROV_ID","barb_rate", "benzo_rate")])
+d$barb_percent<-d$barb_rate*100
+
+
+
+# adding use of adjunct after day 1
+meds_out<-bill %>%
+  filter(SERV_DAY>1) %>%
+  inner_join(meds_lu) %>%
+  group_by(PAT_KEY) %>%
+  summarise(dex_out=max(dex), halo_out=max(halo), clon_out=max(clon), anticon_out=max(valproic)) %>%
+  mutate(adjunct_out=if_else(dex_out==1|halo_out==1|clon_out==1|anticon_out==1,1,0))
+d<-d %>%
+  left_join(meds_out)
+d$dex_out[is.na(d$dex_out)]<-0
+d$halo_out[is.na(d$halo_out)]<-0
+d$clon_out[is.na(d$clon_out)]<-0
+d$adjunct_out[is.na(d$adjunct_out)]<-0
+
+# log LOS
+d$log_los_30<-d$LOS
+d$log_los_30[d$log_los_30>30]<-30
+d$log_los_30<-log(d$log_los_30)
+
+# number of alcohol withdrawal cases per year
+d<-d %>%
+  group_by(PROV_ID) %>%
+  mutate(count=1) %>%
+  summarise(cases_year=sum(count)/5) %>%
+  right_join(d)
+
+# seizures poa
+seizure_poa<-icd_diag %>%
+  filter(ICD_POA=="Y") %>%
+  filter(ICD_CODE %like% "G40.") %>%
+  mutate(seizure_poa=1) %>%
+  group_by(PAT_KEY) %>%
+  summarise(seizure_poa=max(seizure_poa))
+d<-d %>%
+  left_join(seizure_poa)
+d$seizure_poa[is.na(d$seizure_poa)]<-0
+
+# safety net status
+safetynet<-demo %>%
+  mutate(safetynet=if_else(STD_PAYOR==330|STD_PAYOR==340|STD_PAYOR==350|STD_PAYOR==390|STD_PAYOR==400|STD_PAYOR==410,1,0), count=1) %>%
+  group_by(PROV_ID) %>%
+  summarise(safetynet=sum(safetynet), count=sum(count)) %>%
+  mutate(safetynet_rate=safetynet/count)
+safetynet$safetynet<-0
+safetynet$safetynet[safetynet$safetynet_rate>=quantile(safetynet$safetynet_rate, 0.75)]<-1
+d<-d %>%
+  left_join(safetynet %>% select(PROV_ID, safetynet))
+d$safetynet[is.na(d$safetynet)]<-0
+```
+
+# table1 and vizualization
+```{r table 1}
+d$RACE[d$RACE=="U"]<-"O"
+d$RACE[d$RACE=="A"]<-"zA"
+d$PROV_ID<-factor(d$PROV_ID)
+
+#table 1
+table1(~factor(year) + factor(GENDER) + AGE + factor(RACE) +factor(PROV_REGION) + factor(BEDS_GRP) +factor(icu) +cases_year + factor(TEACHING) +factor(safetynet) + cases_year + factor(seizure_poa) +factor(benzo) + factor(halo) +factor(alpha) + factor(valproic) +elix + factor(alcohol) + factor(drug) + factor(cardiovascular_dombrovskiy) + factor(respiratory_dombrovskiy) + factor(neurologic_dombrovskiy) + factor(hematologic_dombrovskiy) + factor(hepatic_dombrovskiy) + factor(renal_dombrovskiy) + factor(death) + factor(mv_out) + LOS +log_los_30 + factor(adjunct_out) + dex_out + halo_out  | factor(barb), data=d)
+
+# barb use by hospital
+# confidence intervals
+hosp$z<-1.96
+hosp$se<-sqrt((hosp$barb_rate*(1-hosp$barb_rate)/hosp$count))
+hosp$lower<-hosp$barb_rate-(hosp$z*hosp$se)
+hosp$upper<-hosp$barb_rate+(hosp$z*hosp$se)
+hosp$lower[hosp$lower<0]<-0
+
+hosp2<-hosp %>%
+  filter(barb_rate>0)
+
+#use by hospital
+ggplot(hosp2, aes(x=reorder(PROV_ID, barb_rate), y=barb_rate*100))+
+  geom_point()+
+  geom_errorbar(aes(ymin=lower*100, ymax=upper*100), width=0) +
+  theme_bw() +
+  theme(panel.border = element_blank(), panel.grid.major = element_blank(),
+panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"))+
+  theme(axis.text.x = element_blank(), axis.ticks = element_blank())+
+  ylab("Phenobarbital use (%)")+
+  xlab("Hospital")+
+  ylim(0,100)
+
+# average dose by hospital
+hosp3<- d %>%
+  filter(!is.na(phenobarb_dose) & barb==1) %>%
+  mutate(count=1) %>%
+  group_by(PROV_ID) %>%
+  summarise(hospital_phenobarb_dose=sum(phenobarb_dose), count=sum(count)) %>%
+  mutate(hospital_phenobarb_dose=hospital_phenobarb_dose/count)
+
+hosp4<- hosp3 %>%
+  filter(hospital_phenobarb_dose>0) %>%
+  left_join(d) %>%
+  filter(!is.na(phenobarb_dose) & barb==1) %>%
+  arrange(hospital_phenobarb_dose)
+
+ggplot(hosp4, aes(x=reorder(PROV_ID, phenobarb_dose), y=phenobarb_dose))+
+  geom_boxplot(outlier.shape = NA)+
+  theme_bw() +
+  theme(panel.border = element_blank(), panel.grid.major = element_blank(),
+panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"))+
+  theme(axis.text.x = element_blank(), axis.ticks = element_blank())+
+  ylab("Average Day 1 phenobarbital cumulative dose (mg)")+
+  xlab("Hospital")+
+  coord_cartesian(ylim=c(0,2500))
+```
+
+# visualizing year trends
+```{r hospital by quarter}
+# change in use of different categories of treatment over time
+year<- d %>%
+  mutate(count=1) %>%
+  group_by(year) %>%
+  summarise(barb=sum(barb), long_benzo=sum(long_benzo), inter_benzo=sum(inter_benzo), short_benzo=sum(short_benzo), dex=sum(dex), prop=sum(prop), halo=sum(halo), clon=sum(clon), count=sum(count), benzo=sum(benzo), alpha=sum(alpha), anti_convulsants=sum(valproic)) %>%
+  mutate(barb=(barb/count)*100, long_benzo=(long_benzo/count)*100, inter_benzo=(inter_benzo/count)*100, short_benzo=(short_benzo/count)*100, dex=(dex/count)*100, prop=(prop/count)*100, halo=(halo/count)*100,clon=(clon/count)*100, benzo=(benzo/count)*100, alpha=(alpha/count)*100, anti_convulsants=(anti_convulsants/count)*100)
+
+year_longer<-year %>%
+  pivot_longer(cols=c(2,8,11,12), names_to="Medication", values_to="Percent") %>%
+  mutate(width=if_else(Medication=="barb",2,1))
+
+year_longer$Medication<-factor(year_longer$Medication, level=c("barb","halo","benzo","alpha", "anti_convulsants"), labels=c("Phenobarbital","Anti-psychotics","Benzodiazepines","Alpha-agonists", "Anti-convulsants"))
+
+year_longer$z<-1.96
+year_longer$se<-sqrt((year_longer$Percent/100*(1-year_longer$Percent/100)/year_longer$count))
+year_longer$lower<-year_longer$Percent/100-(year_longer$z*year_longer$se)
+year_longer$upper<-year_longer$Percent/100+(year_longer$z*year_longer$se)
+year_longer$lower[year_longer$lower<0]<-0
+
+ggplot(year_longer, aes(x=year, y=Percent, color=Medication))+
+  geom_point()+
+  geom_line()+
+  geom_errorbar(aes(ymin=lower*100, ymax=upper*100), width=0.10) +
+  theme_bw() +
+  theme(panel.border = element_blank(), panel.grid.major = element_blank(),
+panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"))+
+  ylab("Medication use (%)")+
+  xlab("Year")+
+  theme(legend.position="bottom",legend.title = element_blank()) 
+
+# change in use (absolute and relative over time)
+year<- year %>%
+  mutate(barb_diff=round(barb-lag(barb,4),1), barb_rel_diff=round(100*(barb-lag(barb,4))/lag(barb,4),1),
+         long_benzo_diff=round(long_benzo-lag(long_benzo,4),1), long_benzo_rel_diff=round(100*(long_benzo-lag(long_benzo,4))/lag(long_benzo,4),1),
+         inter_benzo_diff=round(inter_benzo-lag(inter_benzo,4),1), inter_benzo_rel_diff=round(100*(inter_benzo-lag(inter_benzo,4))/lag(inter_benzo,4),1),
+         short_benzo_diff=round(short_benzo-lag(short_benzo,4),1), short_benzo_rel_diff=round(100*(short_benzo-lag(short_benzo,4))/lag(short_benzo,4),1),
+         prop_diff=round(prop-lag(prop,4),1), prop_rel_diff=round(100*(prop-lag(prop,4))/lag(prop,4),1),
+         dex_diff=round(dex-lag(dex,4),1), dex_rel_diff=round(100*(dex-lag(dex,4))/lag(dex,4),1),
+         halo_diff=round(halo-lag(halo,4),1), halo_rel_diff=round(100*(halo-lag(halo,4))/lag(halo,4),1),
+         clon_diff=round(clon-lag(clon,4),1), clon_rel_diff=round(100*(clon-lag(clon,4))/lag(clon,4),1),
+         benzo_diff=round(benzo-lag(benzo,4),1), benzo_rel_diff=round(100*(benzo-lag(benzo,4))/lag(benzo,4),1),
+         alpha_diff=round(alpha-lag(alpha,4),1), alpha_rel_diff=round(100*(alpha-lag(alpha,4))/lag(alpha,4),1))
+
+# overall average barb dose among those given phenobarb
+summary(d$phenobarb_dose[!is.na(d$phenobarb_dose) & d$phenobarb_dose>0])
+```
+
+# modeling
+```{r models for phenobarb use}
+# models for phenobarb risk factors
+mod<-glmer(barb~factor(year) + factor(GENDER) + scale(AGE) + factor(RACE) +factor(PROV_REGION) + factor(BEDS_GRP) + factor(TEACHING)+factor(safetynet) + cases_year +factor(seizure_poa) + factor(benzo) +  factor(halo) +factor(alpha) +factor(valproic)  + scale(elix) + factor(drug) + factor(cardiovascular_dombrovskiy) + factor(respiratory_dombrovskiy) + factor(neurologic_dombrovskiy) + factor(hematologic_dombrovskiy) + factor(hepatic_dombrovskiy) + factor(renal_dombrovskiy)+(1|PROV_ID), family="binomial", data=d,control=glmerControl(calc.derivs = FALSE, optimizer="nloptwrap",optCtrl=list(maxfun=2e5)))
+
+modsum<-summary(mod)
+co<-round(exp(modsum$coefficients[-1,1]),2)
+ci<-round(exp(confint(mod, method="Wald")[-c(1,2),]),2)
+p<-round(modsum$coefficients[-1,4],3)
+
+ef<-bind_cols(co, data.frame(ci), p) %>%
+  mutate(upper=round(`X97.5..`,2), lower=round(`X2.5..`,2), aor=round(`...1`,2), p=`...4`) %>%
+  select(aor, lower, upper, p)
+
+
+#MOR for primary model
+t<- ranef(mod,condVar = TRUE)
+est<-as.numeric(unlist(t$PROV_ID))
+var<- as.numeric(unlist(attr(t$PROV_ID,"postVar")))
+mor_boot<- c()
+for(i in 1:1000){
+drw<- rnorm(n = length(est),mean = est,sd = sqrt(var))
+s<- combn(drw,2)
+mor_boot<- c(mor_boot, median(exp(abs(s[1,]- s[2,]))))}
+mor<-quantile(mor_boot, c(.025,.5,.975))
+```
+
+# did
+```{r did}
+qu<- d
+qu$qu<-NA
+qu$qu[qu$DISC_MON>2016100]<-1
+qu$qu[qu$DISC_MON>2016200]<-2
+qu$qu[qu$DISC_MON>2016300]<-3
+qu$qu[qu$DISC_MON>2016400]<-4
+qu$qu[qu$DISC_MON>2017100]<-5
+qu$qu[qu$DISC_MON>2017200]<-6
+qu$qu[qu$DISC_MON>2017300]<-7
+qu$qu[qu$DISC_MON>2017400]<-8
+qu$qu[qu$DISC_MON>2018100]<-9
+qu$qu[qu$DISC_MON>2018200]<-10
+qu$qu[qu$DISC_MON>2018300]<-11
+qu$qu[qu$DISC_MON>2018400]<-12
+qu$qu[qu$DISC_MON>2019100]<-13
+qu$qu[qu$DISC_MON>2019200]<-14
+qu$qu[qu$DISC_MON>2019300]<-15
+qu$qu[qu$DISC_MON>2019400]<-16
+qu$qu[qu$DISC_MON>2020100]<-17
+qu$qu[qu$DISC_MON>2020200]<-18
+qu$qu[qu$DISC_MON>2020300]<-19
+qu$qu[qu$DISC_MON>2020400]<-20
+
+qu1<- qu %>%
+  mutate(count=1) %>%
+  group_by(PROV_ID, year) %>%
+  summarise(count=sum(count),barb=sum(barb)) %>%
+  mutate(barbp=barb/count)
+
+# IMPLEMENTERS
+# categorizing (never uses, some low users, always users, and implementers with data for each year
+qu3<-qu1 %>%
+  pivot_wider(id_cols=PROV_ID, names_from=year, values_from=barbp) %>%
+  filter(!is.na(`2016`) & !is.na(`2017`) & !is.na(`2018`) & !is.na(`2018`) & !is.na(`2020`))
+
+qu3$group<-"mixed"
+qu3$group[qu3$`2016`>0 & qu3$`2017`>0 & qu3$`2018`>0 & qu3$`2019`>0 & qu3$`2020`>0]<-"always"
+qu3$group[qu3$`2016`==0 & qu3$`2017`==0 & qu3$`2018`==0 & qu3$`2019`==0 & qu3$`2020`==0]<-"never"
+qu3$group[qu3$`2016`==0 & qu3$`2017`>0 & qu3$`2018`>0 & qu3$`2019`>0 & qu3$`2020`>0]<-"implementer"
+qu3$group[qu3$`2016`==0 & qu3$`2017`==0 & qu3$`2018`>0 & qu3$`2019`>0 & qu3$`2020`>0]<-"implementer"
+qu3$group[qu3$`2016`==0 & qu3$`2017`==0 & qu3$`2018`==0 & qu3$`2019`>0 & qu3$`2020`>0]<-"implementer"
+qu3$group[qu3$`2016`==0 & qu3$`2017`==0 & qu3$`2018`==0 & qu3$`2019`==0 & qu3$`2020`>0]<-"implementer_exclude"
+
+qu3$group2<-"Non-adopter hospitals"
+qu3$group2[qu3$group=="implementer"]<-"Phenobarbital-adopter hospitals"
+
+# add implementers back to dataset (remove hospitals that implemented in 2020 only)
+qu4<- qu3 %>%
+  filter(group!="implementer_exclude") %>%
+  select(PROV_ID, group, group2) %>%
+  left_join(qu)
+
+# by month for parallel trends assumptions
+pltr<- qu4 %>%
+  filter(year==2016) %>%
+  mutate(count=1) %>%
+  group_by(DISC_MON, group2) %>%
+  summarise(count=sum(count), barb=sum(barb), mv=sum(mv_out), adjunct=sum(adjunct_out), LOS=median(LOS), log_median_los=log(median(LOS))) %>%
+  mutate(barbp=barb/count, mvp=mv/count, adjunctp=adjunct/count) %>%
+  ungroup() %>%
+  mutate(month=c(1,1,2,2,3,3,4,4,5,5,6,6,7,7,8,8,9,9,10,10,11,11,12,12))
+
+ggplot(pltr, aes(x=month, y=mvp, color=group2))+
+  geom_point()+
+  geom_smooth(method="lm", se=F)+
+  ylab("Proportion of patients who are initiated on IMV")+
+  xlab("Month in 2016")+
+ coord_cartesian(ylim=c(0,0.25))+
+  theme_bw() +
+  theme(panel.border = element_blank(), panel.grid.major = element_blank(),
+panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"))+
+  theme(legend.position="bottom",legend.title = element_blank()) 
+
+ggplot(pltr, aes(x=month, y=adjunctp, color=group2))+
+  geom_point()+
+  geom_smooth(method="lm", se=F)+
+  ylab("Proportion of patients who receive adjunct medications")+
+  xlab("Month in 2016")+
+ coord_cartesian(ylim=c(0.25,0.75))+
+  theme_bw() +
+  theme(panel.border = element_blank(), panel.grid.major = element_blank(),
+panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"))+
+  theme(legend.position="bottom",legend.title = element_blank()) 
+
+
+ggplot(pltr, aes(x=month, y=log_median_los, color=group2))+
+  geom_point()+
+  geom_smooth(method="lm", se=F)+
+  ylab("log median LOS days")+
+  xlab("Month in 2016")+
+ coord_cartesian(ylim=c(0,5))+
+  theme_bw() +
+  theme(panel.border = element_blank(), panel.grid.major = element_blank(),
+panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"))+
+  theme(legend.position="bottom",legend.title = element_blank()) 
+
+
+# by year
+qu5<- qu4 %>%
+  mutate(count=1) %>%
+  group_by(qu, group2) %>%
+  summarise(count=sum(count), barb=sum(barb), mv=sum(mv_out), adjunct=sum(adjunct_out), LOS=mean(LOS)) %>%
+  mutate(barbp=barb/count, mvp=mv/count, adjunctp=adjunct/count)
+
+ggplot(qu5, aes(x=qu, y=barbp, color=group2))+
+  geom_line()+
+  ylab("Proportion of patients that recieve phenobarbital")+
+  xlab("Quarter (2016-2020)")+
+    theme_bw() +
+  theme(panel.border = element_blank(), panel.grid.major = element_blank(),
+panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"))+
+  theme(legend.position="bottom",legend.title = element_blank()) 
+
+
+# DiD comparing outcomes of patients in 2016 to 2020 basd on implementers in between
+qu6<-qu4 %>%
+  filter(year==2016|year==2020) %>%
+  mutate(prepost=if_else(year<2018,0,1))
+
+qu7<-qu6 %>%
+  mutate(count=1) %>%
+  group_by(prepost, group2) %>%
+  summarise(count=sum(count), adj=sum(adjunct_out), mv=sum(mv_out), barb=sum(barb), los=mean(LOS)) %>%
+  mutate(adjp=adj/count, mvp=mv/count, barbp=(barb/count)*100)
+
+# table 1
+table1(~factor(year) + factor(GENDER) + AGE + factor(RACE) +factor(PROV_REGION) + factor(BEDS_GRP) +factor(icu) +cases_year + factor(TEACHING) +factor(safetynet) + cases_year + factor(seizure_poa) +factor(benzo) + factor(halo) +factor(alpha) + factor(valproic) +phenobarb_dose +elix + factor(alcohol) + factor(drug) + factor(cardiovascular_dombrovskiy) + factor(respiratory_dombrovskiy) + factor(neurologic_dombrovskiy) + factor(hematologic_dombrovskiy) + factor(hepatic_dombrovskiy) + factor(renal_dombrovskiy)   | factor(group2), data=qu6)
+
+#linear probability models
+#unadjusted
+un1<-lmer(mv_out~factor(prepost)*factor(group2)+(1|PROV_ID), qu6)
+un2<-lmer(adjunct_out~factor(prepost)*factor(group2)+(1|PROV_ID), qu6)
+un3<-lmer(log_los_30~factor(prepost)*factor(group2)+(1|PROV_ID), qu6)
+
+un1o<-c(round(fixef(un1)[4]*100,1), round(confint(un1)[6,1]*100,1), round(confint(un1)[6,2]*100,1))
+un2o<-c(round(fixef(un2)[4]*100,1), round(confint(un2)[6,1]*100,1), round(confint(un2)[6,2]*100,1))
+un3o<-c(round(fixef(un3)[4],2), round(confint(un3)[6,1],2), round(confint(un3)[6,2],2))
+
+un<-t(data.frame(un1o, un2o, un3o))
+row.names(un)<-c("mv","adjunct","log_los")
+colnames(un)<-c("estimate","lower","upper")
+
+
+
+
+#adjusted
+an1<-lmer(mv_out~factor(prepost)*factor(group2)+phenobarb_dose+ factor(GENDER) + scale(AGE) + factor(RACE) +factor(PROV_REGION) + factor(BEDS_GRP) + factor(TEACHING)+factor(safetynet) + cases_year +factor(seizure_poa) + factor(benzo) +factor(valproic) +  factor(halo) +factor(alpha)  + scale(elix) + factor(drug) + factor(cardiovascular_dombrovskiy) + factor(respiratory_dombrovskiy) + factor(neurologic_dombrovskiy) + factor(hematologic_dombrovskiy) + factor(hepatic_dombrovskiy) + factor(renal_dombrovskiy)+(1|PROV_ID), qu6)
+an2<-lmer(adjunct_out~factor(prepost)*factor(group2)+phenobarb_dose+ factor(GENDER) + scale(AGE) + factor(RACE) +factor(PROV_REGION) + factor(BEDS_GRP) + factor(TEACHING)+factor(safetynet) + cases_year +factor(seizure_poa) + factor(benzo) +factor(valproic) +  factor(halo) +factor(alpha)  + scale(elix) + factor(drug) + factor(cardiovascular_dombrovskiy) + factor(respiratory_dombrovskiy) + factor(neurologic_dombrovskiy) + factor(hematologic_dombrovskiy) + factor(hepatic_dombrovskiy) + factor(renal_dombrovskiy)+(1|PROV_ID), qu6)
+an3<-lmer(log_los_30~factor(prepost)*factor(group2)+phenobarb_dose+ factor(GENDER) + scale(AGE) + factor(RACE) +factor(PROV_REGION) + factor(BEDS_GRP) + factor(TEACHING)+factor(safetynet) + cases_year +factor(seizure_poa) + factor(benzo) +factor(valproic) +  factor(halo) +factor(alpha)  + scale(elix) + factor(drug) + factor(cardiovascular_dombrovskiy) + factor(respiratory_dombrovskiy) + factor(neurologic_dombrovskiy) + factor(hematologic_dombrovskiy) + factor(hepatic_dombrovskiy) + factor(renal_dombrovskiy)+(1|PROV_ID), qu6)
+
+an1o<-c(round(fixef(an1)[35]*100,1), round(confint(an1)[37,1]*100,1), round(confint(an1)[37,2]*100,1))
+an2o<-c(round(fixef(an2)[35]*100,1), round(confint(an2)[37,1]*100,1), round(confint(an2)[37,2]*100,1))
+an3o<-c(round(fixef(an3)[35],2), round(confint(an3)[37,1],2), round(confint(an3)[37,2],2))
+
+an<-t(data.frame(an1o, an2o, an3o))
+row.names(an)<-c("mv","adjunct","log_los")
+colnames(an)<-c("estimate","lower","upper")
+
+un
+an
+```
+
