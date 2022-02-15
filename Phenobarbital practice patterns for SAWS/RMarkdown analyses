@@ -670,3 +670,170 @@ un
 an
 ```
 
+# did - sensitivity no intermittent phenobarbital use hospitals
+```{r did sensitivity}
+qu<- d
+qu$qu<-NA
+qu$qu[qu$DISC_MON>2016100]<-1
+qu$qu[qu$DISC_MON>2016200]<-2
+qu$qu[qu$DISC_MON>2016300]<-3
+qu$qu[qu$DISC_MON>2016400]<-4
+qu$qu[qu$DISC_MON>2017100]<-5
+qu$qu[qu$DISC_MON>2017200]<-6
+qu$qu[qu$DISC_MON>2017300]<-7
+qu$qu[qu$DISC_MON>2017400]<-8
+qu$qu[qu$DISC_MON>2018100]<-9
+qu$qu[qu$DISC_MON>2018200]<-10
+qu$qu[qu$DISC_MON>2018300]<-11
+qu$qu[qu$DISC_MON>2018400]<-12
+qu$qu[qu$DISC_MON>2019100]<-13
+qu$qu[qu$DISC_MON>2019200]<-14
+qu$qu[qu$DISC_MON>2019300]<-15
+qu$qu[qu$DISC_MON>2019400]<-16
+qu$qu[qu$DISC_MON>2020100]<-17
+qu$qu[qu$DISC_MON>2020200]<-18
+qu$qu[qu$DISC_MON>2020300]<-19
+qu$qu[qu$DISC_MON>2020400]<-20
+
+qu1<- qu %>%
+  mutate(count=1) %>%
+  group_by(PROV_ID, year) %>%
+  summarise(count=sum(count),barb=sum(barb)) %>%
+  mutate(barbp=barb/count)
+
+# IMPLEMENTERS
+# categorizing (never uses, some low users, always users, and implementers with data for each year
+qu3<-qu1 %>%
+  pivot_wider(id_cols=PROV_ID, names_from=year, values_from=barbp) %>%
+  filter(!is.na(`2016`) & !is.na(`2017`) & !is.na(`2018`) & !is.na(`2018`) & !is.na(`2020`))
+
+qu3$group<-"mixed"
+qu3$group[qu3$`2016`>0 & qu3$`2017`>0 & qu3$`2018`>0 & qu3$`2019`>0 & qu3$`2020`>0]<-"always"
+qu3$group[qu3$`2016`==0 & qu3$`2017`==0 & qu3$`2018`==0 & qu3$`2019`==0 & qu3$`2020`==0]<-"never"
+qu3$group[qu3$`2016`==0 & qu3$`2017`>0 & qu3$`2018`>0 & qu3$`2019`>0 & qu3$`2020`>0]<-"implementer"
+qu3$group[qu3$`2016`==0 & qu3$`2017`==0 & qu3$`2018`>0 & qu3$`2019`>0 & qu3$`2020`>0]<-"implementer"
+qu3$group[qu3$`2016`==0 & qu3$`2017`==0 & qu3$`2018`==0 & qu3$`2019`>0 & qu3$`2020`>0]<-"implementer"
+qu3$group[qu3$`2016`==0 & qu3$`2017`==0 & qu3$`2018`==0 & qu3$`2019`==0 & qu3$`2020`>0]<-"implementer_exclude"
+
+qu3$group2<-"Non-adopter hospitals"
+qu3$group2[qu3$group=="implementer"]<-"Phenobarbital-adopter hospitals"
+
+
+# add implementers back to dataset (remove hospitals that implemented in 2020 only)
+qu4<- qu3 %>%
+  filter(group!="implementer_exclude" & group!="mixed") %>%
+  select(PROV_ID, group, group2) %>%
+  left_join(qu)
+
+# by month for parallel trends assumptions
+pltr<- qu4 %>%
+  filter(year==2016) %>%
+  mutate(count=1) %>%
+  group_by(DISC_MON, group2) %>%
+  summarise(count=sum(count), barb=sum(barb), mv=sum(mv_out), adjunct=sum(adjunct_out), LOS=median(LOS), log_median_los=log(median(LOS))) %>%
+  mutate(barbp=barb/count, mvp=mv/count, adjunctp=adjunct/count) %>%
+  ungroup() %>%
+  mutate(month=c(1,1,2,2,3,3,4,4,5,5,6,6,7,7,8,8,9,9,10,10,11,11,12,12))
+
+ggplot(pltr, aes(x=month, y=mvp, color=group2))+
+  geom_point()+
+  geom_smooth(method="lm", se=F)+
+  ylab("Proportion of patients who are initiated on IMV")+
+  xlab("Month in 2016")+
+ coord_cartesian(ylim=c(0,0.25))+
+  theme_bw() +
+  theme(panel.border = element_blank(), panel.grid.major = element_blank(),
+panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"))+
+  theme(legend.position="bottom",legend.title = element_blank()) 
+
+
+ggplot(pltr, aes(x=month, y=adjunctp, color=group2))+
+  geom_point()+
+  geom_smooth(method="lm", se=F)+
+  ylab("Proportion of patients who receive adjunct medications")+
+  xlab("Month in 2016")+
+ coord_cartesian(ylim=c(0.25,0.75))+
+  theme_bw() +
+  theme(panel.border = element_blank(), panel.grid.major = element_blank(),
+panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"))+
+  theme(legend.position="bottom",legend.title = element_blank()) 
+
+
+ggplot(pltr, aes(x=month, y=log_median_los, color=group2))+
+  geom_point()+
+  geom_smooth(method="lm", se=F)+
+  ylab("log median LOS days")+
+  xlab("Month in 2016")+
+ coord_cartesian(ylim=c(0,5))+
+  theme_bw() +
+  theme(panel.border = element_blank(), panel.grid.major = element_blank(),
+panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"))+
+  theme(legend.position="bottom",legend.title = element_blank()) 
+
+
+
+# by year
+qu5<- qu4 %>%
+  mutate(count=1) %>%
+  group_by(qu, group2) %>%
+  summarise(count=sum(count), barb=sum(barb), mv=sum(mv_out), adjunct=sum(adjunct_out), LOS=mean(LOS)) %>%
+  mutate(barbp=barb/count, mvp=mv/count, adjunctp=adjunct/count)
+
+ggplot(qu5, aes(x=qu, y=barbp, color=group2))+
+  geom_line()+
+  ylab("Proportion of patients that recieve phenobarbital")+
+  xlab("Quarter (2016-2020)")+
+    theme_bw() +
+  theme(panel.border = element_blank(), panel.grid.major = element_blank(),
+panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"))+
+  theme(legend.position="bottom",legend.title = element_blank()) 
+
+# DiD comparing outcomes of patients in 2016 to 2020 basd on implementers in between
+qu6<-qu4 %>%
+  filter(year==2016|year==2020) %>%
+  mutate(prepost=if_else(year<2018,0,1))
+
+qu7<-qu6 %>%
+  mutate(count=1) %>%
+  group_by(prepost, group2) %>%
+  summarise(count=sum(count), adj=sum(adjunct_out), mv=sum(mv_out), barb=sum(barb), los=mean(LOS)) %>%
+  mutate(adjp=adj/count, mvp=mv/count, barbp=(barb/count)*100)
+
+# table 1
+table1(~factor(year) + factor(GENDER) + AGE + factor(RACE) +factor(PROV_REGION) + factor(BEDS_GRP) +factor(icu) +cases_year + factor(TEACHING) +factor(safetynet) + cases_year + factor(seizure_poa) +factor(benzo) + factor(halo) +factor(alpha) + factor(valproic) +phenobarb_dose +elix + factor(alcohol) + factor(drug) + factor(cardiovascular_dombrovskiy) + factor(respiratory_dombrovskiy) + factor(neurologic_dombrovskiy) + factor(hematologic_dombrovskiy) + factor(hepatic_dombrovskiy) + factor(renal_dombrovskiy)   | factor(group2), data=qu6)
+
+#linear probability models
+#unadjusted
+un1<-lmer(mv_out~factor(prepost)*factor(group2)+(1|PROV_ID), qu6)
+un2<-lmer(adjunct_out~factor(prepost)*factor(group2)+(1|PROV_ID), qu6)
+un3<-lmer(log_los_30~factor(prepost)*factor(group2)+(1|PROV_ID), qu6)
+
+un1o<-c(round(fixef(un1)[4]*100,1), round(confint(un1)[6,1]*100,1), round(confint(un1)[6,2]*100,1))
+un2o<-c(round(fixef(un2)[4]*100,1), round(confint(un2)[6,1]*100,1), round(confint(un2)[6,2]*100,1))
+un3o<-c(round(((exp(fixef(un3)[4])-1)*100),1), round(((exp(confint(un3)[6,1])-1)*100),1), round(((exp(confint(un3)[6,2])-1)*100),1))
+
+un<-t(data.frame(un1o, un2o, un3o))
+row.names(un)<-c("mv","adjunct","log_los")
+colnames(un)<-c("estimate","lower","upper")
+
+
+
+
+#adjusted
+an1<-lmer(mv_out~factor(prepost)*factor(group2)+phenobarb_dose+ factor(GENDER) + scale(AGE) + factor(RACE) +factor(PROV_REGION) + factor(BEDS_GRP) + factor(TEACHING)+factor(safetynet) + cases_year +factor(seizure_poa) + factor(benzo) +factor(valproic) +  factor(halo) +factor(alpha)  + scale(elix) + factor(drug) + factor(cardiovascular_dombrovskiy) + factor(respiratory_dombrovskiy) + factor(neurologic_dombrovskiy) + factor(hematologic_dombrovskiy) + factor(hepatic_dombrovskiy) + factor(renal_dombrovskiy)+(1|PROV_ID), qu6)
+
+an2<-lmer(adjunct_out~factor(prepost)*factor(group2)+phenobarb_dose+ factor(GENDER) + scale(AGE) + factor(RACE) +factor(PROV_REGION) + factor(BEDS_GRP) + factor(TEACHING)+factor(safetynet) + cases_year +factor(seizure_poa) + factor(benzo) +factor(valproic) +  factor(halo) +factor(alpha)  + scale(elix) + factor(drug) + factor(cardiovascular_dombrovskiy) + factor(respiratory_dombrovskiy) + factor(neurologic_dombrovskiy) + factor(hematologic_dombrovskiy) + factor(hepatic_dombrovskiy) + factor(renal_dombrovskiy)+(1|PROV_ID), qu6)
+
+an3<-lmer(log_los_30~factor(prepost)*factor(group2)+phenobarb_dose+ factor(GENDER) + scale(AGE) + factor(RACE) +factor(PROV_REGION) + factor(BEDS_GRP) + factor(TEACHING)+factor(safetynet) + cases_year +factor(seizure_poa) + factor(benzo) +factor(valproic) +  factor(halo) +factor(alpha)  + scale(elix) + factor(drug) + factor(cardiovascular_dombrovskiy) + factor(respiratory_dombrovskiy) + factor(neurologic_dombrovskiy) + factor(hematologic_dombrovskiy) + factor(hepatic_dombrovskiy) + factor(renal_dombrovskiy)+(1|PROV_ID), qu6)
+
+an1o<-c(round(fixef(an1)[35]*100,1), round(confint(an1)[37,1]*100,1), round(confint(an1)[37,2]*100,1))
+an2o<-c(round(fixef(an2)[35]*100,1), round(confint(an2)[37,1]*100,1), round(confint(an2)[37,2]*100,1))
+an3o<-c(round(((exp(fixef(an3)[35])-1)*100),1), round(((exp(confint(an3)[37,1])-1)*100),1), round(((exp(confint(an3)[37,2])-1)*100),1))
+        
+an<-t(data.frame(an1o, an2o, an3o))
+row.names(an)<-c("mv","adjunct","log_los")
+colnames(an)<-c("estimate","lower","upper")
+
+un
+an
+```
