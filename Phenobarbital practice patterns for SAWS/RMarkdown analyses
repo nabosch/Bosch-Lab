@@ -149,7 +149,7 @@ bill<-bind_rows(
     bill20191, bill20192, bill20193, bill20194,
     bill20201, bill20202, bill20203, bill20204)
 
-#icu 
+#icu or stepdown unit
 icu_lu<- bill_lu %>%
   filter((CLIN_SUM_DESC=="R&B ICU" & !STD_CHG_DESC %like% "PSYCH" & !STD_CHG_DESC %like% "NURSERY" & !STD_CHG_DESC %like% "PEDIATRIC") | (CLIN_SUM_DESC=="R&B STEP DOWN" & !STD_CHG_DESC %like% "PSYCH" & !STD_CHG_DESC %like% "NURSERY" * !STD_CHG_DESC %like% "PEDIATRIC")) %>%
   mutate(icu=if_else(CLIN_SUM_DESC=="R&B ICU",1,0))
