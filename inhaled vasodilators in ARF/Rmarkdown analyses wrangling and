@@ -1,0 +1,1532 @@
+---
+title: "epo vs ino premier"
+output:
+  word_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(comorbidity)
+library(rdrobust)
+library(tableone)
+library(data.table)
+library(ggpubr)
+library(lme4)
+library(zoo)
+library(ggrepel)
+library(cmprsk)
+library(crrSC)
+library(survminer)
+library(ezfun)
+library(survival)
+library(survey)
+library(lqmm)
+library(MatchIt)
+library(cobalt)
+library(ggalluvial)
+library(sjstats)
+```
+
+# Introduction  
+Patients with severe acute respiratory failure (ARF) and acute respiratory distress syndrome (ARDS) may develop refractory hypoxia despite maximal ventilator settings. In these cases, inhaled nitric oxide or epoprostenol may be considered for rescue therapy. However, although these medications transiently increase oxygenation relative to placebo, little is known about practice patterns and the comparative effectiveness of these inhaled therapies.  In this study, we sought to (1) characterize inhaled nitric oxide and epoprostenol practice patterns across United States intensive care units (ICUs), the results from which would then inform (2) a target trial emulation examining the comparitive effectiveness of inhaled nitric oxide versus epoprostenol. Our overarching approach was based on the hypothesis that we could identify hospitals that exclusively used either inhaled nitric oxide or epoprostenol for patients with ARF or ARDS and that we could leverage this exclusive use of treatments to mimic a cluster randomized clinical trial.  
+
+
+# practice patterns of inhaled medications  
+## cohort wrangling  
+  1) adults 18+ years  
+  2) premier 2016-2020  
+  3) ICD-10 for ARF w/ hypoxia, ACRF w/ hypoxia or ARDS that was POA and no ICD-10 for PH or raynauds  
+  4) IMV in the MICU and not initiated before day 0 (ed day)  
+  5) MICU or general ICU admission  
+  6) no procedure code for bypass  
+
+  
+```{r wrangling1}
+icd_lu <- fread("/project/walkelab/Premier Raw Data/Full cohort/bu_icdcode.txt.gz", 
+    sep="|")
+
+bill_lu <- fread("/project/walkelab/Premier Raw Data/Full cohort/bu_chgmstr.txt.gz", 
+    sep="|")
+
+prov<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_providers.txt.gz", sep="|")
+
+physpec<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_physpec.txt.gz", sep="|")
+
+icd_diag20161<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20161_paticd_diag.txt.gz", sep="|") %>% mutate(year=2016)
+icd_diag20162<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20162_paticd_diag.txt.gz", sep="|") %>% mutate(year=2016)
+icd_diag20163<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20163_paticd_diag.txt.gz", sep="|") %>% mutate(year=2016)
+icd_diag20164<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20164_paticd_diag.txt.gz", sep="|") %>% mutate(year=2016)
+icd_diag20171<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20171_paticd_diag.txt.gz", sep="|") %>% mutate(year=2017)
+icd_diag20172<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20172_paticd_diag.txt.gz", sep="|") %>% mutate(year=2017)
+icd_diag20173<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20173_paticd_diag.txt.gz", sep="|") %>% mutate(year=2017)
+icd_diag20174<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20174_paticd_diag.txt.gz", sep="|") %>% mutate(year=2017)
+icd_diag20181<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20181_paticd_diag.txt.gz", sep="|") %>% mutate(year=2018)
+icd_diag20182<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20182_paticd_diag.txt.gz", sep="|") %>% mutate(year=2018)
+icd_diag20183<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20183_paticd_diag.txt.gz", sep="|") %>% mutate(year=2018)
+icd_diag20184<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20184_paticd_diag.txt.gz", sep="|") %>% mutate(year=2018)
+icd_diag20191<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20191_paticd_diag.txt.gz", sep="|") %>% mutate(year=2019)
+icd_diag20192<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20192_paticd_diag.txt.gz", sep="|") %>% mutate(year=2019)
+icd_diag20193<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20193_paticd_diag.txt.gz", sep="|") %>% mutate(year=2019)
+icd_diag20194<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20194_paticd_diag.txt.gz", sep="|") %>% mutate(year=2019)
+icd_diag20201<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20201_paticd_diag.txt.gz", sep="|") %>% mutate(year=2020)
+icd_diag20202<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20202_paticd_diag.txt.gz", sep="|") %>% mutate(year=2020)
+icd_diag20203<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20203_paticd_diag.txt.gz", sep="|") %>% mutate(year=2020)
+icd_diag20204<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20204_paticd_diag.txt.gz", sep="|") %>% mutate(year=2020)
+
+icd_diag<-bind_rows(
+    icd_diag20161, icd_diag20162, icd_diag20163, icd_diag20164,
+    icd_diag20171, icd_diag20172, icd_diag20173, icd_diag20174,
+    icd_diag20181, icd_diag20182, icd_diag20183, icd_diag20184,
+    icd_diag20191, icd_diag20192, icd_diag20193, icd_diag20194,
+    icd_diag20201, icd_diag20202, icd_diag20203, icd_diag20204)
+
+rm(icd_diag20161)
+rm(icd_diag20162)
+rm(icd_diag20163)
+rm(icd_diag20164)
+rm(icd_diag20171)
+rm(icd_diag20172)
+rm(icd_diag20173)
+rm(icd_diag20174)
+rm(icd_diag20181)
+rm(icd_diag20182)
+rm(icd_diag20183)
+rm(icd_diag20184)
+rm(icd_diag20191)
+rm(icd_diag20192)
+rm(icd_diag20193)
+rm(icd_diag20194)
+rm(icd_diag20201)
+rm(icd_diag20202)
+rm(icd_diag20203)
+rm(icd_diag20204)
+
+icd_proc20161<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20161_paticd_proc.txt.gz", sep="|") %>% mutate(year=2016)
+icd_proc20162<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20162_paticd_proc.txt.gz", sep="|") %>% mutate(year=2016)
+icd_proc20163<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20163_paticd_proc.txt.gz", sep="|") %>% mutate(year=2016)
+icd_proc20164<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20164_paticd_proc.txt.gz", sep="|") %>% mutate(year=2016)
+icd_proc20171<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20171_paticd_proc.txt.gz", sep="|") %>% mutate(year=2017)
+icd_proc20172<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20172_paticd_proc.txt.gz", sep="|") %>% mutate(year=2017)
+icd_proc20173<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20173_paticd_proc.txt.gz", sep="|") %>% mutate(year=2017)
+icd_proc20174<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20174_paticd_proc.txt.gz", sep="|") %>% mutate(year=2017)
+icd_proc20181<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20181_paticd_proc.txt.gz", sep="|") %>% mutate(year=2018)
+icd_proc20182<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20182_paticd_proc.txt.gz", sep="|") %>% mutate(year=2018)
+icd_proc20183<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20183_paticd_proc.txt.gz", sep="|") %>% mutate(year=2018)
+icd_proc20184<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20184_paticd_proc.txt.gz", sep="|") %>% mutate(year=2018)
+icd_proc20191<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20191_paticd_proc.txt.gz", sep="|") %>% mutate(year=2019)
+icd_proc20192<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20192_paticd_proc.txt.gz", sep="|") %>% mutate(year=2019)
+icd_proc20193<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20193_paticd_proc.txt.gz", sep="|") %>% mutate(year=2019)
+icd_proc20194<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20194_paticd_proc.txt.gz", sep="|") %>% mutate(year=2019)
+icd_proc20201<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20201_paticd_proc.txt.gz", sep="|") %>% mutate(year=2020)
+icd_proc20202<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20202_paticd_proc.txt.gz", sep="|") %>% mutate(year=2020)
+icd_proc20203<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20203_paticd_proc.txt.gz", sep="|") %>% mutate(year=2020)
+icd_proc20204<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20204_paticd_proc.txt.gz", sep="|") %>% mutate(year=2020)
+
+icd_proc<-bind_rows(
+    icd_proc20161, icd_proc20162, icd_proc20163, icd_proc20164,
+    icd_proc20171, icd_proc20172, icd_proc20173, icd_proc20174,
+    icd_proc20181, icd_proc20182, icd_proc20183, icd_proc20184,
+    icd_proc20191, icd_proc20192, icd_proc20193, icd_proc20194,
+    icd_proc20201, icd_proc20202, icd_proc20203, icd_proc20204)
+
+rm(icd_proc20161)
+rm(icd_proc20162)
+rm(icd_proc20163)
+rm(icd_proc20164)
+rm(icd_proc20171)
+rm(icd_proc20172)
+rm(icd_proc20173)
+rm(icd_proc20174)
+rm(icd_proc20181)
+rm(icd_proc20182)
+rm(icd_proc20183)
+rm(icd_proc20184)
+rm(icd_proc20191)
+rm(icd_proc20192)
+rm(icd_proc20193)
+rm(icd_proc20194)
+rm(icd_proc20201)
+rm(icd_proc20202)
+rm(icd_proc20203)
+rm(icd_proc20204)
+
+demo20161<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20161_patdemo.txt.gz", sep="|") %>% mutate(year=2016)
+demo20162<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20162_patdemo.txt.gz", sep="|") %>% mutate(year=2016)
+demo20163<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20163_patdemo.txt.gz", sep="|") %>% mutate(year=2016)
+demo20164<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20164_patdemo.txt.gz", sep="|") %>% mutate(year=2016)
+demo20171<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20171_patdemo.txt.gz", sep="|") %>% mutate(year=2017)
+demo20172<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20172_patdemo.txt.gz", sep="|") %>% mutate(year=2017)
+demo20173<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20173_patdemo.txt.gz", sep="|") %>% mutate(year=2017)
+demo20174<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20174_patdemo.txt.gz", sep="|") %>% mutate(year=2017)
+demo20181<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20181_patdemo.txt.gz", sep="|") %>% mutate(year=2018)
+demo20182<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20182_patdemo.txt.gz", sep="|") %>% mutate(year=2018)
+demo20183<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20183_patdemo.txt.gz", sep="|") %>% mutate(year=2018)
+demo20184<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20184_patdemo.txt.gz", sep="|") %>% mutate(year=2018)
+demo20191<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20191_patdemo.txt.gz", sep="|") %>% mutate(year=2019)
+demo20192<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20192_patdemo.txt.gz", sep="|") %>% mutate(year=2019)
+demo20193<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20193_patdemo.txt.gz", sep="|") %>% mutate(year=2019)
+demo20194<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20194_patdemo.txt.gz", sep="|") %>% mutate(year=2019)
+demo20201<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20201_patdemo.txt.gz", sep="|") %>% mutate(year=2020)
+demo20202<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20202_patdemo.txt.gz", sep="|") %>% mutate(year=2020)
+demo20203<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20203_patdemo.txt.gz", sep="|") %>% mutate(year=2020)
+demo20204<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20204_patdemo.txt.gz", sep="|") %>% mutate(year=2020)
+
+
+
+demo<-bind_rows(
+    demo20161, demo20162, demo20163, demo20164,
+    demo20171, demo20172, demo20173, demo20174,
+    demo20181, demo20182, demo20183, demo20184,
+    demo20191, demo20192, demo20193, demo20194,
+    demo20201, demo20202, demo20203, demo20204)
+
+rm(demo20161)
+rm(demo20162)
+rm(demo20163)
+rm(demo20164)
+rm(demo20171)
+rm(demo20172)
+rm(demo20173)
+rm(demo20174)
+rm(demo20181)
+rm(demo20182)
+rm(demo20183)
+rm(demo20184)
+rm(demo20191)
+rm(demo20192)
+rm(demo20193)
+rm(demo20194)
+rm(demo20201)
+rm(demo20202)
+rm(demo20203)
+rm(demo20204)
+
+# defining arf
+arf<- icd_diag %>%
+  filter(ICD_CODE %in% c("J96.01", "J96.21", "J80", "J96.00", "J96.91")) %>%
+  group_by(PAT_KEY) %>%
+  mutate(arf=1, arf_poa=if_else(ICD_POA=="Y",1,0), ards_poa=if_else(ICD_POA=="Y" & ICD_CODE=="J80",1,0)) %>%
+  summarise(arf=max(arf), arf_poa=max(arf_poa), ards_poa=max(ards_poa)) %>%
+  filter(arf_poa==1)
+
+bill20161<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20161_patbill.txt.gz", sep="|") %>% inner_join(arf) %>% select(PAT_KEY, STD_CHG_CODE, SERV_DAY, BILL_COST, STD_QTY) 
+bill20162<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20162_patbill.txt.gz", sep="|") %>% inner_join(arf) %>% select(PAT_KEY, STD_CHG_CODE, SERV_DAY, BILL_COST, STD_QTY) 
+bill20163<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20163_patbill.txt.gz", sep="|") %>% inner_join(arf) %>% select(PAT_KEY, STD_CHG_CODE, SERV_DAY, BILL_COST, STD_QTY) 
+bill20164<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20164_patbill.txt.gz", sep="|") %>% inner_join(arf) %>% select(PAT_KEY, STD_CHG_CODE, SERV_DAY, BILL_COST, STD_QTY) 
+bill20171<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20171_patbill.txt.gz", sep="|") %>% inner_join(arf) %>% select(PAT_KEY, STD_CHG_CODE, SERV_DAY, BILL_COST, STD_QTY) 
+bill20172<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20172_patbill.txt.gz", sep="|") %>% inner_join(arf) %>% select(PAT_KEY, STD_CHG_CODE, SERV_DAY, BILL_COST, STD_QTY) 
+bill20173<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20173_patbill.txt.gz", sep="|") %>% inner_join(arf) %>% select(PAT_KEY, STD_CHG_CODE, SERV_DAY, BILL_COST, STD_QTY) 
+bill20174<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20174_patbill.txt.gz", sep="|") %>% inner_join(arf) %>% select(PAT_KEY, STD_CHG_CODE, SERV_DAY, BILL_COST, STD_QTY) 
+bill20181<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20181_patbill.txt.gz", sep="|") %>% inner_join(arf) %>% select(PAT_KEY, STD_CHG_CODE, SERV_DAY, BILL_COST, STD_QTY) 
+bill20182<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20182_patbill.txt.gz", sep="|") %>% inner_join(arf) %>% select(PAT_KEY, STD_CHG_CODE, SERV_DAY, BILL_COST, STD_QTY) 
+bill20183<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20183_patbill.txt.gz", sep="|") %>% inner_join(arf) %>% select(PAT_KEY, STD_CHG_CODE, SERV_DAY, BILL_COST, STD_QTY) 
+bill20184<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20184_patbill.txt.gz", sep="|") %>% inner_join(arf) %>% select(PAT_KEY, STD_CHG_CODE, SERV_DAY, BILL_COST, STD_QTY) 
+bill20191<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20191_patbill.txt.gz", sep="|") %>% inner_join(arf) %>% select(PAT_KEY, STD_CHG_CODE, SERV_DAY, BILL_COST, STD_QTY) 
+bill20192<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20192_patbill.txt.gz", sep="|") %>% inner_join(arf) %>% select(PAT_KEY, STD_CHG_CODE, SERV_DAY, BILL_COST, STD_QTY) 
+bill20193<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20193_patbill.txt.gz", sep="|") %>% inner_join(arf) %>% select(PAT_KEY, STD_CHG_CODE, SERV_DAY, BILL_COST, STD_QTY) 
+bill20194<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20194_patbill.txt.gz", sep="|") %>% inner_join(arf) %>% select(PAT_KEY, STD_CHG_CODE, SERV_DAY, BILL_COST, STD_QTY) 
+bill20201<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20201_patbill.txt.gz", sep="|") %>% inner_join(arf) %>% select(PAT_KEY, STD_CHG_CODE, SERV_DAY, BILL_COST, STD_QTY) 
+bill20202<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20202_patbill.txt.gz", sep="|") %>% inner_join(arf) %>% select(PAT_KEY, STD_CHG_CODE, SERV_DAY, BILL_COST, STD_QTY) 
+bill20203<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20203_patbill.txt.gz", sep="|") %>% inner_join(arf) %>% select(PAT_KEY, STD_CHG_CODE, SERV_DAY, BILL_COST, STD_QTY) 
+bill20204<-fread("/project/walkelab/Premier Raw Data/Full cohort/bu_20204_patbill.txt.gz", sep="|") %>% inner_join(arf) %>% select(PAT_KEY, STD_CHG_CODE, SERV_DAY, BILL_COST, STD_QTY) 
+
+# arf adults who were were started on IMV no earlier than day 0
+imv_lu<- bill_lu %>%
+    filter(STD_CHG_CODE=="270270013950000" | STD_CHG_CODE=="270270057050000" | STD_CHG_CODE=="270270086600000" | STD_CHG_CODE=="270270088900000" | STD_CHG_CODE=="270270089300000" | STD_CHG_CODE=="290290093620000" | STD_CHG_CODE=="410412946560000" | STD_CHG_CODE=="410412946560001" | STD_CHG_CODE=="410412946570000" | STD_CHG_CODE=="410412946570004" | STD_CHG_CODE=="410412946570005"  | STD_CHG_CODE=="410412946570007" | STD_CHG_CODE=="410412946570009"  | STD_CHG_CODE=="970976946560000" |  STD_CHG_CODE=="970976946570000") %>%
+  mutate(imv=1)
+
+imv20161<-bill20161 %>% inner_join(imv_lu) %>% group_by(PAT_KEY) %>% summarise(imv=max(imv), imv_start=min(SERV_DAY), imv_end=max(SERV_DAY))
+imv20162<-bill20162 %>% inner_join(imv_lu) %>% group_by(PAT_KEY) %>% summarise(imv=max(imv), imv_start=min(SERV_DAY), imv_end=max(SERV_DAY))
+imv20163<-bill20163 %>% inner_join(imv_lu) %>% group_by(PAT_KEY) %>% summarise(imv=max(imv), imv_start=min(SERV_DAY), imv_end=max(SERV_DAY))
+imv20164<-bill20164 %>% inner_join(imv_lu) %>% group_by(PAT_KEY) %>% summarise(imv=max(imv), imv_start=min(SERV_DAY), imv_end=max(SERV_DAY))
+imv20171<-bill20171 %>% inner_join(imv_lu) %>% group_by(PAT_KEY) %>% summarise(imv=max(imv), imv_start=min(SERV_DAY), imv_end=max(SERV_DAY))
+imv20172<-bill20172 %>% inner_join(imv_lu) %>% group_by(PAT_KEY) %>% summarise(imv=max(imv), imv_start=min(SERV_DAY), imv_end=max(SERV_DAY))
+imv20173<-bill20173 %>% inner_join(imv_lu) %>% group_by(PAT_KEY) %>% summarise(imv=max(imv), imv_start=min(SERV_DAY), imv_end=max(SERV_DAY))
+imv20174<-bill20174 %>% inner_join(imv_lu) %>% group_by(PAT_KEY) %>% summarise(imv=max(imv), imv_start=min(SERV_DAY), imv_end=max(SERV_DAY))
+imv20181<-bill20181 %>% inner_join(imv_lu) %>% group_by(PAT_KEY) %>% summarise(imv=max(imv), imv_start=min(SERV_DAY), imv_end=max(SERV_DAY))
+imv20182<-bill20182 %>% inner_join(imv_lu) %>% group_by(PAT_KEY) %>% summarise(imv=max(imv), imv_start=min(SERV_DAY), imv_end=max(SERV_DAY))
+imv20183<-bill20183 %>% inner_join(imv_lu) %>% group_by(PAT_KEY) %>% summarise(imv=max(imv), imv_start=min(SERV_DAY), imv_end=max(SERV_DAY))
+imv20184<-bill20184 %>% inner_join(imv_lu) %>% group_by(PAT_KEY) %>% summarise(imv=max(imv), imv_start=min(SERV_DAY), imv_end=max(SERV_DAY))
+imv20191<-bill20191 %>% inner_join(imv_lu) %>% group_by(PAT_KEY) %>% summarise(imv=max(imv), imv_start=min(SERV_DAY), imv_end=max(SERV_DAY))
+imv20192<-bill20192 %>% inner_join(imv_lu) %>% group_by(PAT_KEY) %>% summarise(imv=max(imv), imv_start=min(SERV_DAY), imv_end=max(SERV_DAY))
+imv20193<-bill20193 %>% inner_join(imv_lu) %>% group_by(PAT_KEY) %>% summarise(imv=max(imv), imv_start=min(SERV_DAY), imv_end=max(SERV_DAY))
+imv20194<-bill20194 %>% inner_join(imv_lu) %>% group_by(PAT_KEY) %>% summarise(imv=max(imv), imv_start=min(SERV_DAY), imv_end=max(SERV_DAY))
+imv20201<-bill20201 %>% inner_join(imv_lu) %>% group_by(PAT_KEY) %>% summarise(imv=max(imv), imv_start=min(SERV_DAY), imv_end=max(SERV_DAY))
+imv20202<-bill20202 %>% inner_join(imv_lu) %>% group_by(PAT_KEY) %>% summarise(imv=max(imv), imv_start=min(SERV_DAY), imv_end=max(SERV_DAY))
+imv20203<-bill20203 %>% inner_join(imv_lu) %>% group_by(PAT_KEY) %>% summarise(imv=max(imv), imv_start=min(SERV_DAY), imv_end=max(SERV_DAY))
+imv20204<-bill20204 %>% inner_join(imv_lu) %>% group_by(PAT_KEY) %>% summarise(imv=max(imv), imv_start=min(SERV_DAY), imv_end=max(SERV_DAY))
+
+imv<-bind_rows(
+    imv20161, imv20162, imv20163, imv20164,
+    imv20171, imv20172, imv20173, imv20174,
+    imv20181, imv20182, imv20183, imv20184,
+    imv20191, imv20192, imv20193, imv20194,
+    imv20201, imv20202, imv20203, imv20204)
+
+imv1<-imv %>% filter(imv_start>=0)
+
+h<-arf %>%
+  left_join(demo) %>%
+  left_join(imv) %>%
+  filter(AGE>=18 & !is.na(imv) & imv==1 & imv_start>=0)
+
+
+bill<-bind_rows(
+    bill20161 %>% inner_join(h %>% select(PAT_KEY)),
+    bill20162 %>% inner_join(h %>% select(PAT_KEY)),
+    bill20163 %>% inner_join(h %>% select(PAT_KEY)),
+    bill20164 %>% inner_join(h %>% select(PAT_KEY)),
+    bill20171 %>% inner_join(h %>% select(PAT_KEY)),
+    bill20172 %>% inner_join(h %>% select(PAT_KEY)),
+    bill20173 %>% inner_join(h %>% select(PAT_KEY)),
+    bill20174 %>% inner_join(h %>% select(PAT_KEY)),
+    bill20181 %>% inner_join(h %>% select(PAT_KEY)),
+    bill20182 %>% inner_join(h %>% select(PAT_KEY)),
+    bill20183 %>% inner_join(h %>% select(PAT_KEY)),
+    bill20184 %>% inner_join(h %>% select(PAT_KEY)),
+    bill20191 %>% inner_join(h %>% select(PAT_KEY)),
+    bill20192 %>% inner_join(h %>% select(PAT_KEY)),
+    bill20193 %>% inner_join(h %>% select(PAT_KEY)),
+    bill20194 %>% inner_join(h %>% select(PAT_KEY)),
+    bill20201 %>% inner_join(h %>% select(PAT_KEY)),
+    bill20202 %>% inner_join(h %>% select(PAT_KEY)),
+    bill20203 %>% inner_join(h %>% select(PAT_KEY)),
+    bill20204 %>% inner_join(h %>% select(PAT_KEY)))
+
+rm(bill20161)
+rm(bill20162)
+rm(bill20163)
+rm(bill20164)
+rm(bill20171)
+rm(bill20172)
+rm(bill20173)
+rm(bill20174)
+rm(bill20181)
+rm(bill20182)
+rm(bill20183)
+rm(bill20184)
+rm(bill20191)
+rm(bill20192)
+rm(bill20193)
+rm(bill20194)
+rm(bill20201)
+rm(bill20202)
+rm(bill20203)
+rm(bill20204)
+
+rm(imv20161)
+rm(imv20162)
+rm(imv20163)
+rm(imv20164)
+rm(imv20171)
+rm(imv20172)
+rm(imv20173)
+rm(imv20174)
+rm(imv20181)
+rm(imv20182)
+rm(imv20183)
+rm(imv20184)
+rm(imv20191)
+rm(imv20192)
+rm(imv20193)
+rm(imv20194)
+rm(imv20201)
+rm(imv20202)
+rm(imv20203)
+rm(imv20204)
+```
+
+
+
+## dataset wrangling  
+```{r wranglingpp}
+med_lu<- bill_lu %>%
+  filter(STD_CHG_DESC%in% c("CONTINUOUS INHALATION TREATMENT 1ST HOUR", "CONTINUOUS INHALATION TREATMENT EA ADDL HOUR") | PROD_NAME_METH_DESC %like% "EPOPROSTENOL" | (STD_CHG_DESC=="NITRIC OXIDE PER HR" | STD_CHG_DESC=="NITRIC OXIDE FLAT RATE")) %>%
+  mutate(inhaled=if_else(STD_CHG_DESC%in% c("CONTINUOUS INHALATION TREATMENT 1ST HOUR", "CONTINUOUS INHALATION TREATMENT EA ADDL HOUR"),1,0), nitric=if_else(STD_CHG_DESC=="NITRIC OXIDE PER HR" | STD_CHG_DESC=="NITRIC OXIDE FLAT RATE",1,0), epo=if_else(PROD_NAME_METH_DESC %like% "EPOPROSTENOL",1,0))
+
+epo<- bill %>%
+  inner_join(med_lu) %>%
+  filter(epo==1)
+
+inhaled<- bill %>%
+  inner_join(med_lu) %>%
+  filter(inhaled==1)
+
+epoi<-epo %>%
+  select(PAT_KEY, SERV_DAY, epo) %>%
+  inner_join(inhaled %>%
+               select(PAT_KEY, SERV_DAY, inhaled)) %>%
+  group_by(PAT_KEY) %>%
+  summarise(epo_start=min(SERV_DAY), epo_end=max(SERV_DAY)) %>%
+  ungroup()
+
+nitric<- bill %>%
+  inner_join(med_lu) %>%
+  filter(nitric==1) %>%
+  group_by(PAT_KEY) %>%
+  summarise(nitric_start=min(SERV_DAY), nitric_end=max(SERV_DAY)) %>%
+  ungroup()
+
+# limited to patients not started on inhaled therapies prior to imv initiation
+h1<- h %>%
+  left_join(epoi) %>%
+  left_join(nitric) %>%
+  filter(((!is.na(epo_start) & epo_start>=imv_start)|is.na(epo_start)) & ((!is.na(nitric_start) & nitric_start>=imv_start)|is.na(nitric_start))) %>%
+  mutate(nitric=if_else(!is.na(nitric_start) & nitric_start>=imv_start & nitric_start<=imv_end,1,0), epo=if_else(!is.na(epo_start) & epo_start>=imv_start & epo_start<=imv_end,1,0))
+
+h1$nitric_start[h1$nitric==0]<-NA
+h1$nitric_end[h1$nitric==0]<-NA
+h1$epo_start[h1$epo==0]<-NA
+h1$epo_end[h1$epo==0]<-NA
+
+# limited to patients with arf poa
+tt<-h1 %>%
+  filter(arf_poa==1)
+
+ardstt<-tt %>% filter(ards_poa==1)
+
+tt$first_inhaled_therapy<-NA
+tt$first_inhaled_therapy[tt$epo==1 & tt$nitric==0]<-"epo"
+tt$first_inhaled_therapy[tt$epo==0 & tt$nitric==1]<-"nitric"
+tt$first_inhaled_therapy[tt$epo==1 & tt$nitric==1 & !is.na(tt$epo_start) & !is.na(tt$nitric_start) & tt$epo_start<tt$nitric_start]<-"epo"
+tt$first_inhaled_therapy[tt$epo==1 & tt$nitric==1 & !is.na(tt$epo_start) & !is.na(tt$nitric_start) & tt$epo_start>tt$nitric_start]<-"nitric"
+tt$first_inhaled_therapy[tt$epo==1 & tt$nitric==1 & !is.na(tt$epo_start) & !is.na(tt$nitric_start) & tt$epo_start==tt$nitric_start]<-"both"
+
+tt$inhaled_med<-NA
+tt$inhaled_med[tt$nitric==1]<-"nitric"
+tt$inhaled_med[tt$nitric==1 & tt$epo==1]<-"both"
+tt$inhaled_med[tt$nitric==0 & tt$epo==1]<-"epo"
+
+tt$days_from_imv_to_inhaled[!is.na(tt$first_inhaled_therapy) & tt$first_inhaled_therapy=="epo"]<-tt$epo_start[!is.na(tt$first_inhaled_therapy) & tt$first_inhaled_therapy=="epo"]-tt$imv_start[!is.na(tt$first_inhaled_therapy) & tt$first_inhaled_therapy=="epo"]
+tt$days_from_imv_to_inhaled[!is.na(tt$first_inhaled_therapy) & tt$first_inhaled_therapy=="nitric"]<-tt$nitric_start[!is.na(tt$first_inhaled_therapy) & tt$first_inhaled_therapy=="nitric"]-tt$imv_start[!is.na(tt$first_inhaled_therapy) & tt$first_inhaled_therapy=="nitric"]
+tt$days_from_imv_to_inhaled[!is.na(tt$first_inhaled_therapy) & tt$first_inhaled_therapy=="both"]<-tt$epo_start[!is.na(tt$first_inhaled_therapy) & tt$first_inhaled_therapy=="both"]-tt$imv_start[!is.na(tt$first_inhaled_therapy) & tt$first_inhaled_therapy=="both"]
+
+tt$epo_days<-tt$epo_end-tt$epo_start
+tt$nitric_days<-tt$nitric_end-tt$nitric_start
+
+# limiting to those who received a single treatment
+tt1<-tt %>%
+  filter(!is.na(first_inhaled_therapy))
+
+ardstt2<-ardstt %>%
+  select(PAT_KEY) %>%
+  left_join(tt1)
+
+nrow(ardstt2 %>%filter(!is.na(first_inhaled_therapy)))
+
+# no cardiac surgery, bypass or lung transplant before or on day that inhaled therapy was started
+cardiac_surgery1<- icd_proc %>%
+  filter(ICD_CODE %in% c("0210093", "0210098", "0210099", "021009C", "021009F", "021009W", "02100A3", "02100A8", "02100A9", "02100AC", "02100AF", "02100AW", "02100J3", "02100J8", "02100J9", "02100JC", "02100JF", "02100JW", "02100K3", "02100K8", "02100K9", "02100KC", "02100KF", "02100KW", "02100Z3", "02100Z8", "02100Z9", "02100ZC", "02100ZF", "0210493", "0210498", "0210499", "021049C", "021049F", "021049W", "02104A3", "02104A8", "02104A9", "02104AC", "02104AF", "02104AW", "02104J3", "02104J8", "02104J9", "02104JC", "02104JF", "02104JW", "02104K3", "02104K8", "02104K9", "02104KC", "02104KF", "02104KW", "02104Z3", "02104Z8", "02104Z9", "02104ZC", "02104ZF", "0211093", "0211098", "0211099", "021109C", "021109F", "021109W", "02110A3", "02110A8", "02110A9", "02110AC", "02110AF", "02110AW", "02110J3", "02110J8", "02110J9", "02110JC", "02110JF", "02110JW", "02110K3", "02110K8", "02110K9", "02110KC", "02110KF", "02110KW", "02110Z3", "02110Z8", "02110Z9", "02110ZC", "02110ZF", "0211493", "0211498", "0211499", "021149C", "021149F", "021149W", "02114A3", "02114A8", "02114A9", "02114AC", "02114AF", "02114AW", "02114J3", "02114J8", "02114J9", "02114JC", "02114JF", "02114JW", "02114K3", "02114K8", "02114K9", "02114KC", "02114KF", "02114KW", "02114Z3", "02114Z8", "02114Z9", "02114ZC", "02114ZF", "0212093", "0212098", "0212099", "021209C", "021209F", "021209W", "02120A3", "02120A8", "02120A9", "02120AC", "02120AF", "02120AW", "02120J3", "02120J8", "02120J9", "02120JC", "02120JF", "02120JW", "02120K3", "02120K8", "02120K9", "02120KC", "02120KF", "02120KW", "02120Z3", "02120Z8", "02120Z9", "02120ZC", "02120ZF", "0212493", "0212498", "0212499", "021249C", "021249F", "021249W", "02124A3", "02124A8", "02124A9", "02124AC", "02124AF", "02124AW", "02124J3", "02124J8", "02124J9", "02124JC", "02124JF", "02124JW", "02124K3", "02124K8", "02124K9", "02124KC", "02124KF", "02124KW", "02124Z3", "02124Z8", "02124Z9", "02124ZC", "02124ZF", "0213093", "0213098", "0213099", "021309C", "021309F", "021309W", "02130A3", "02130A8", "02130A9", "02130AC", "02130AF", "02130AW", "02130J3", "02130J8", "02130J9", "02130JC", "02130JF", "02130JW", "02130K3", "02130K8", "02130K9", "02130KC", "02130KF", "02130KW", "02130Z3", "02130Z8", "02130Z9", "02130ZC", "02130ZF", "0213493", "0213498", "0213499", "021349C", "021349F", "021349W", "02134A3", "02134A8", "02134A9", "02134AC", "02134AF", "02134AW", "02134J3", "02134J8", "02134J9", "02134JC", "02134JF", "02134JW", "02134K3", "02134K8", "02134K9", "02134KC", "02134KF", "02134KW", "02134Z3", "02134Z8", "02134Z9", "02134ZC", "02134ZF", "021K0Z8", "021609P", "021609Q", "021609R", "02160AP", "02160AQ", "02160AR", "02160JP", "02160JQ", "02160JR", "02160KP", "02160KQ", "02160KR", "02160ZP", "02160ZQ", "02160ZR", "021649P", "021649Q", "021649R", "02164AP", "02164AQ", "02164AR", "02164JP", "02164JQ", "02164JR", "02164KP", "02164KQ", "02164KR", "02164ZP", "02164ZQ", "02164ZR", "021709P", "021709Q", "021709R", "02170AP", "02170AQ", "02170AR", "02170JP", "02170JQ", "02170JR", "02170KP", "02170KQ", "02170KR", "02170ZP", "02170ZQ", "02170ZR", "021749P", "021749Q", "021749R", "02174AP", "02174AQ", "02174AR", "02174JP", "02174JQ", "02174JR", "02174KP", "02174KQ", "02174KR", "02174ZP", "02174ZQ", "02174ZR", "021K09P", "021K09Q", "021K09R", "021K0AP", "021K0AQ", "021K0AR", "021K0JP", "021K0JQ", "021K0JR", "021K0KP", "021K0KQ", "021K0KR", "021K0ZP", "021K0ZQ", "021K0ZR", "021K49P", "021K49Q", "021K49R", "021K4AP", "021K4AQ", "021K4AR", "021K4JP", "021K4JQ", "021K4JR", "021K4KP", "021K4KQ", "021K4KR", "021K4ZP", "021K4ZQ", "021K4ZR", "021L0ZW", "021L4ZW", "025D0ZZ", "025D3ZZ", "025D4ZZ", "027F04Z", "027F0DZ", "027F0ZZ", "027F34Z", "027F3DZ", "027F3ZZ", "027F44Z", "027F4DZ", "027F4ZZ", "027G04Z", "027G0DZ", "027G0ZZ", "027G34Z", "027G3DZ", "027G3ZZ", "027G44Z", "027G4DZ", "027G4ZZ", "027H04Z", "027H0DZ", "027H0ZZ", "027H34Z", "027H3DZ", "027H3ZZ", "027H44Z", "027H4DZ", "027H4ZZ", "027J04Z", "027J0DZ", "027J0ZZ")) %>%
+  group_by(PAT_KEY) %>%
+  mutate(cardiac_surgery=1) %>%
+  summarise(cardiac_surgery_day=min(PROC_DAY))
+
+cardiac_surgery2<- icd_proc %>%
+  filter(ICD_CODE %in% c(
+"027J34Z", "027J3DZ", "027J3ZZ", "027J44Z", "027J4DZ", "027J4ZZ", "02890ZZ", "02893ZZ", "02894ZZ", "028D0ZZ", "028D3ZZ", "028D4ZZ", "02B50ZZ", "02B53ZZ", "02B54ZZ", "02BD0ZZ", "02BD3ZZ", "02BD4ZZ", "02BK0ZZ", "02BK3ZZ", "02BK4ZZ", "02C50ZZ", "02C53ZZ", "02C54ZZ", "02CD0ZZ", "02CD3ZZ", "02CD4ZZ", "02CF0ZZ", "02CF3ZZ", "02CF4ZZ", "02CG0ZZ", "02CG3ZZ", "02CG4ZZ", "02CH0ZZ", "02CH3ZZ", "02CH4ZZ", "02CJ0ZZ", "02CJ3ZZ", "02CJ4ZZ", "02CM0ZZ", "02CM3ZZ", "02CM4ZZ", "02LR0ZT", "02LS0ZZ", "02LT0ZZ", "02N50ZZ", "02N53ZZ", "02N54ZZ", "02N90ZZ", "02N93ZZ", "02N94ZZ", "02ND0ZZ", "02ND3ZZ", "02ND4ZZ", "02NF0ZZ", "02NF3ZZ", "02NF4ZZ", "02NG0ZZ", "02NG3ZZ", "02NG4ZZ", "02NH0ZZ", "02NH3ZZ", "02NH4ZZ", "02NJ0ZZ", "02NJ3ZZ", "02NJ4ZZ", "02NK0ZZ", "02NK3ZZ", "02NK4ZZ", "02NL0ZZ", "02NL3ZZ", "02NL4ZZ", "02NM0ZZ", "02NM3ZZ", "02NM4ZZ", "02Q50ZZ", "02Q53ZZ", "02Q54ZZ", "02Q90ZZ", "02Q93ZZ", "02Q94ZZ", "02QA0ZZ", "02QA3ZZ", "02QA4ZZ", "02QB0ZZ", "02QB3ZZ", "02QB4ZZ", "02QC0ZZ", "02QC3ZZ", "02QC4ZZ", "02QD0ZZ", "02QD3ZZ", "02QD4ZZ", "02QF0ZZ", "02QF3ZZ", "02QF4ZZ", "02QG0ZZ", "02QG3ZZ", "02QG4ZZ", "02QH0ZZ", "02QH3ZZ", "02QH4ZZ", "02QJ0ZZ", "02QJ3ZZ", "02QJ4ZZ", "02QM0ZZ", "02QM3ZZ", "02QM4ZZ", "02R907Z", "02R908Z", "02R90JZ", "02R90KZ", "02R947Z", "02R948Z", "02R94JZ", "02R94KZ", "02RD07Z", "02RD08Z", "02RD0JZ", "02RD0KZ", "02RD47Z", "02RD48Z", "02RD4JZ", "02RD4KZ", "02RF07Z", "02RF08Z", "02RF0JZ", "02RF0KZ", "02RF37H", "02RF37Z", "02RF38H", "02RF38Z", "02RF3JH", "02RF3JZ", "02RF3KH", "02RF3KZ", "02RF47Z", "02RF48Z", "02RF4JZ", "02RF4KZ", "02RG07Z", "02RG08Z", "02RG0JZ", "02RG0KZ", "02RG37H", "02RG37Z", "02RG38H", "02RG38Z", "02RG3JH", "02RG3JZ", "02RG3KH", "02RG3KZ", "02RG47Z", "02RG48Z", "02RG4JZ", "02RG4KZ", "02RH07Z", "02RH08Z", "02RH0JZ", "02RH0KZ", "02RH37H", "02RH37Z", "02RH38H", "02RH38Z", "02RH3JH", "02RH3JZ", "02RH3KH", "02RH3KZ", "02RH47Z", "02RH48Z", "02RH4JZ", "02RH4KZ", "02RJ07Z", "02RJ08Z", "02RJ0JZ", "02RJ0KZ", "02RJ47Z", "02RJ48Z", "02RJ4JZ", "02RJ4KZ", "02RK07Z", "02RK0KZ", "02RK47Z", "02RK4KZ", "02RL07Z", "02RL0KZ", "02RL47Z", "02RL4KZ", "02RM07Z", "02RM0JZ", "02RM0KZ", "02RM47Z", "02RM4JZ", "02RM4KZ", "02RP0JZ", "02RQ07Z", "02RQ0JZ", "02RR07Z", "02RR0JZ", "02SP0ZZ", "02SW0ZZ", "02T50ZZ", "02T53ZZ", "02T54ZZ", "02T90ZZ", "02T93ZZ", "02T94ZZ", "02TD0ZZ", "02TD3ZZ", "02TD4ZZ", "02TH0ZZ", "02TH3ZZ", "02TH4ZZ", "02TM0ZZ", "02TM3ZZ", "02TM4ZZ", "02U507Z", "02U508Z", "02U50JZ", "02U50KZ", "02U537Z", "02U538Z", "02U53JZ", "02U53KZ", "02U547Z", "02U548Z", "02U54JZ", "02U54KZ", "02U607Z", "02U608Z", "02U60KZ", "02U707Z", "02U708Z", "02U70JZ", "02U70KZ", "02U737Z", "02U738Z", "02U73KZ", "02U747Z", "02U748Z", "02U74KZ", "02U907Z", "02U908Z", "02U90JZ", "02U90KZ", "02U937Z", "02U938Z", "02U93JZ", "02U93KZ", "02U947Z", "02U948Z", "02U94JZ", "02U94KZ", "02UD07Z", "02UD08Z", "02UD0JZ", "02UD0KZ", "02UD37Z", "02UD38Z", "02UD3JZ", "02UD3KZ", "02UD47Z", "02UD48Z", "02UD4JZ", "02UD4KZ", "02UF07Z", "02UF08Z", "02UF0JZ", "02UF0KZ", "02UF37Z", "02UF38Z", "02UF3JZ", "02UF3KZ", "02UF47Z", "02UF48Z", "02UF4JZ", "02UF4KZ", "02UG07Z", "02UG08Z", "02UG0JZ", "02UG0KZ", "02UG37Z")) %>%
+  group_by(PAT_KEY) %>%
+  mutate(cardiac_surgery=1) %>%
+  summarise(cardiac_surgery_day=min(PROC_DAY))
+
+cardiac_surgery3<- icd_proc %>%
+  filter(ICD_CODE %in% c(
+"02UG38Z", "02UG3JZ", "02UG3KZ", "02UG47Z", "02UG48Z", "02UG4JZ", "02UG4KZ", "02UH07Z", "02UH08Z", "02UH0JZ", "02UH0KZ", "02UH37Z", "02UH38Z", "02UH3JZ", "02UH3KZ", "02UH47Z", "02UH48Z", "02UH4JZ", "02UH4KZ", "02UJ07Z", "02UJ08Z", "02UJ0JZ", "02UJ0KZ", "02UJ37Z", "02UJ38Z", "02UJ3JZ", "02UJ3KZ", "02UJ47Z", "02UJ48Z", "02UJ4JZ", "02UJ4KZ", "02UK0KZ", "02UK3KZ", "02UK4KZ", "02UL0KZ", "02UL3KZ", "02UL4KZ", "02UM07Z", "02UM0JZ", "02UM0KZ", "02UM37Z", "02UM38Z", "02UM3JZ", "02UM3KZ", "02UM47Z", "02UM48Z", "02UM4JZ", "02UM4KZ", "02VR0ZT", "02W50JZ", "02W54JZ", "02WF07Z", "02WF08Z", "02WF0JZ", "02WF0KZ", "02WF47Z", "02WF48Z", "02WF4JZ", "02WF4KZ", "02WG07Z", "02WG08Z", "02WG0JZ", "02WG0KZ", "02WG47Z", "02WG48Z", "02WG4JZ", "02WG4KZ", "02WH07Z", "02WH08Z", "02WH0JZ", "02WH0KZ", "02WH47Z", "02WH48Z", "02WH4JZ", "02WH4KZ", "02WJ07Z", "02WJ08Z", "02WJ0JZ", "02WJ0KZ", "02WJ47Z", "02WJ48Z", "02WJ4JZ", "02WJ4KZ", "02WM0JZ", "02WM4JZ", "02YA0Z0", "02YA0Z1", "02YA0Z2")) %>%
+  group_by(PAT_KEY) %>%
+  mutate(cardiac_surgery=1) %>%
+  summarise(cardiac_surgery_day=min(PROC_DAY))
+
+cardiac_surgery_day<- bind_rows(cardiac_surgery1, cardiac_surgery2, cardiac_surgery3) %>%
+  group_by(PAT_KEY) %>%
+  summarise(cardiac_surgery_day=min(cardiac_surgery_day))
+
+bypass_day<- icd_proc %>%
+  filter(ICD_CODE %in% c("5A1221Z")) %>%
+  mutate(bypass=1) %>%
+  group_by(PAT_KEY) %>%
+  summarise(bypass_day=min(PROC_DAY))
+
+rhc_day<- icd_proc %>%
+  filter(ICD_CODE %in% c("4A023N8", "4A023N6")) %>%
+  mutate(rhc=1) %>%
+  group_by(PAT_KEY) %>%
+  summarise(rhc_day=min(PROC_DAY))
+
+lung_tx_day<- icd_proc %>%
+  filter(ICD_CODE %in% c("0BYM0Z0", "0BYC0Z0", "0BYC0Z1", "0BYC0Z2", "0BYD0Z0", "0BYD0Z1", "0BYD0Z2", "0BYF0Z0", "0BYF0Z1", "0BYF0Z2", "0BYG0Z0", "0BYG0Z1", "0BYG0Z2", "0BYH0Z0", "0BYH0Z1", "0BYH0Z2", "0BYJ0Z0", "0BYJ0Z1", "0BYJ0Z2", "0BYK0Z0", "0BYK0Z1", "0BYK0Z2", "0BYL0Z0", "0BYL0Z1", "0BYL0Z2", "0BYM0Z0", "0BYM0Z1", "0BYM0Z2")) %>%
+  mutate(lung_tx=1) %>%
+  group_by(PAT_KEY) %>%
+  summarise(lung_tx_day=min(PROC_DAY))
+
+tt2<- tt1 %>%
+  left_join(cardiac_surgery_day) %>%
+  left_join(bypass_day) %>%
+  left_join(lung_tx_day) %>%
+  left_join(rhc_day) %>%
+  filter((is.na(cardiac_surgery_day)|cardiac_surgery_day>imv_start+days_from_imv_to_inhaled) & (is.na(bypass_day)|bypass_day>imv_start+days_from_imv_to_inhaled) & (is.na(lung_tx_day)|lung_tx_day>imv_start+days_from_imv_to_inhaled) & (is.na(lung_tx_day)|rhc_day>imv_start+days_from_imv_to_inhaled))
+
+# no ph med or inotrope prior to or on day of inhaled therapy initiation
+pah_med_lu<- bill_lu %>%
+  filter(PROD_NAME_METH_DESC %like% "ILOPROST" | PROD_NAME_METH_DESC %like% "TREPROSTINIL" | PROD_NAME_METH_DESC %like% "SELEXIPAG" | 
+           PROD_NAME_METH_DESC %like% "BOSENTAN" | PROD_NAME_METH_DESC %like% "AMBRISENTAN" | PROD_NAME_METH_DESC %like% "MACITENTAN" |
+           PROD_NAME_METH_DESC %like% "REVATIO" | PROD_NAME_METH_DESC %like% "SILDENAFIL" | PROD_NAME_METH_DESC %like% "TADALAFIL" | PROD_NAME_METH_DESC %like% "RIOCIQUAT"
+           ) %>%
+  mutate(pah_med=1)
+
+View(pah_med_lu[,1])
+View(nmb_lu[,1])
+
+pah_med_day<- bill %>%
+  inner_join(pah_med_lu) %>%
+  group_by(PAT_KEY) %>%
+  summarise(pah_med_day=min(SERV_DAY))
+
+tt3a<-tt2 %>%
+  left_join(pah_med_day) %>%
+  filter((is.na(pah_med_day)|pah_med_day>imv_start+days_from_imv_to_inhaled))
+
+# excluding ph, pe, rhf, raynauds
+ph_pe_rhf_raynauds_cong_poa<- icd_diag %>%
+  inner_join(icd_lu) %>%
+  filter(ICD_CODE %in% c("I27.0", "I27.20", "I27.21", "I27.22", "I27.23", "I27.24", "I27.29", "I27.81", "I27.82", "I27.83", "I27.81", "I27.82", "I27.83", "I73.00", "I73.01", "I26.01", "I26.02", "I26.09", "I26.90", "I26.92", "I26.93", "I26.94", "I26.99", "I50.810", "I50.811", "I50.812", "I50.813", "I50.814", "I50.82") | (ICD_CODE %like% "Q2" & ICD_DIAG_PROC_DESC=="Diagnosis")) %>%
+  mutate(
+    ph=if_else(ICD_CODE %in% c("I27.0", "I27.20", "I27.21", "I27.22", "I27.23", "I27.24", "I27.29", "I27.81", "I27.82", "I27.83", "I27.81", "I27.82", "I27.83"),1,0),
+    pe=if_else(ICD_CODE %in% c("I26.01", "I26.02", "I26.09", "I26.90", "I26.92", "I26.93", "I26.94", "I26.99"),1,0), 
+    raynauds=if_else(ICD_CODE %in% c("I73.00", "I73.01"),1,0),
+    rhf=if_else(ICD_CODE %in% c("I50.810", "I50.811", "I50.812", "I50.813", "I50.814", "I50.82"),1,0),
+    cong=if_else(ICD_CODE %like% "Q2" & ICD_DIAG_PROC_DESC=="Diagnosis",1,0),
+    ph_poa=if_else(ICD_CODE %in% c("I27.0", "I27.20", "I27.21", "I27.22", "I27.23", "I27.24", "I27.29", "I27.81", "I27.82", "I27.83", "I27.81", "I27.82", "I27.83") & ICD_POA=="Y",1,0),
+    pe_poa=if_else(ICD_CODE %in% c("I26.01", "I26.02", "I26.09", "I26.90", "I26.92", "I26.93", "I26.94", "I26.99") & ICD_POA=="Y",1,0),
+    raynauds_poa=if_else(ICD_CODE %in% c("I73.00", "I73.01") & ICD_POA=="Y",1,0),
+    rhf_poa=if_else(ICD_CODE %in% c("I50.810", "I50.811", "I50.812", "I50.813", "I50.814", "I50.82") & ICD_POA=="Y",1,0),
+    cong_poa=if_else(ICD_CODE %like% "Q2" & ICD_DIAG_PROC_DESC=="Diagnosis" & ICD_POA=="Y",1,0)) %>%
+  group_by(PAT_KEY) %>%
+  summarise(ph_poa=max(ph_poa), raynauds_poa=max(raynauds_poa), rhf_poa=max(rhf_poa), pe_poa=max(pe_poa), cong_poa=max(cong_poa))
+
+tt3<-tt3a %>%
+  left_join(ph_pe_rhf_raynauds_cong_poa) %>%
+  mutate(ph_poa=if_else(!is.na(ph_poa) & ph_poa==1,1,0), raynauds_poa=if_else(!is.na(raynauds_poa) & raynauds_poa==1,1,0), rhf_poa=if_else(!is.na(rhf_poa) & rhf_poa==1,1,0), pe_poa=if_else(!is.na(pe_poa) & pe_poa==1,1,0), cong_poa=if_else(!is.na(cong_poa) & cong_poa==1,1,0)) %>%
+  filter(ph_poa==0 & raynauds_poa==0 & pe_poa==0 & rhf_poa==0 & cong_poa==0)
+
+# elixhauser
+elix<-tt3 %>%
+  select(PAT_KEY) %>%
+  left_join(icd_diag) %>%
+  mutate(icdcode=str_replace_all(ICD_CODE, "[[:punct:]]", "")) %>% 
+  filter(ICD_POA=="Y")
+
+elix1<- elix %>%
+  filter(!is.na(icdcode)) %>%
+  as.data.frame() %>%
+  comorbidity(code="icdcode", id="PAT_KEY", score="elixhauser", assign0=T, icd="icd10") %>%
+  select(PAT_KEY, elix=score, alcohol, drug)
+
+tt4<-tt3 %>%
+  left_join(elix1)
+
+# dombrovskiy organ dysfunction poa
+dombrovskiy_lu <- icd_lu %>%
+  mutate(cardiovascular_dombrovskiy=if_else(ICD_CODE %in% c("R57.9","R57.0","R65.21","R57.1","R57.8","I95.1","I95.89","I95.9","R03.1","I46.9"),1,0),
+         respiratory_dombrovskiy=if_else(ICD_CODE %in% c("J96.01","J96.02","J96.90","J96.91","J96.92","J80","R06.03",
+"R06.00","R06.09","R06.3","R06.83","R06.89","R09.2"),1,0),
+         neurologic_dombrovskiy=if_else(ICD_CODE %in% c("G93.40","F05","G93.1", "R40.20", "R40.1"),1,0),
+         hematologic_dombrovskiy=if_else(ICD_CODE %in% c("D69.59","D69.6","D65","D68.8","D68.9"),1,0),
+         hepatic_dombrovskiy=if_else(ICD_CODE %in% c("K72.00","K72.01","K72.91","K76.2", "K76.3"),1,0),
+         renal_dombrovskiy=if_else(ICD_CODE %in% c("N17.0","N17.1","N17.2","N17.8","N17.9"),1,0)) %>%
+  filter(cardiovascular_dombrovskiy==1|respiratory_dombrovskiy==1|neurologic_dombrovskiy==1|hematologic_dombrovskiy==1|hepatic_dombrovskiy==1|renal_dombrovskiy==1)
+
+dombrovskiy_diag<-tt4 %>%
+  select(PAT_KEY) %>%
+  left_join(icd_diag) %>%
+  filter(ICD_POA=="Y") %>%
+  inner_join(dombrovskiy_lu) %>%
+  dplyr::select(PAT_KEY, cardiovascular_dombrovskiy, respiratory_dombrovskiy, neurologic_dombrovskiy, hematologic_dombrovskiy, hepatic_dombrovskiy, renal_dombrovskiy)
+
+dombrovskiy<-dombrovskiy_diag %>%
+  group_by(PAT_KEY) %>%
+  summarise(cardiovascular_dombrovskiy=max(cardiovascular_dombrovskiy), respiratory_dombrovskiy=max(respiratory_dombrovskiy), neurologic_dombrovskiy=max(neurologic_dombrovskiy), hematologic_dombrovskiy=max(hematologic_dombrovskiy), hepatic_dombrovskiy=max(hepatic_dombrovskiy), renal_dombrovskiy=max(renal_dombrovskiy)) %>% mutate(dombrovskiy=cardiovascular_dombrovskiy+respiratory_dombrovskiy+neurologic_dombrovskiy+hematologic_dombrovskiy+hepatic_dombrovskiy+renal_dombrovskiy)
+ 
+tt5<-tt4 %>%
+  left_join(dombrovskiy) %>%
+  mutate(cardiovascular_dombrovskiy=if_else(!is.na(cardiovascular_dombrovskiy) & cardiovascular_dombrovskiy==1,1,0),
+         respiratory_dombrovskiy=if_else(!is.na(respiratory_dombrovskiy) & respiratory_dombrovskiy==1,1,0),
+         neurologic_dombrovskiy=if_else(!is.na(neurologic_dombrovskiy) & neurologic_dombrovskiy==1,1,0),
+         hematologic_dombrovskiy=if_else(!is.na(hematologic_dombrovskiy) & hematologic_dombrovskiy==1,1,0),
+         hepatic_dombrovskiy=if_else(!is.na(hepatic_dombrovskiy) & hepatic_dombrovskiy==1,1,0),
+         renal_dombrovskiy=if_else(!is.na(renal_dombrovskiy) & renal_dombrovskiy==1,1,0))
+
+# provider factors
+tt6<-tt5 %>%
+  left_join(prov) %>%
+  mutate(insurance=if_else(STD_PAYOR %in% c(300,310,320), "medicare", if_else(STD_PAYOR %in% c(330,340,350,360,370), "medicaid", if_else(STD_PAYOR %in% c(380), "commercial", if_else(STD_PAYOR %in% c(390,400,410), "selfpay_charity", "other")))),
+         hospital_beds=if_else(BEDS_GRP %in% c("000-099", "100-199", "200-299"), "0-299", if_else(BEDS_GRP %in% c("300-399", "400-499"), "300-499", "500+")))
+
+
+hosp_prop_medicaid_charity<- demo %>%
+  group_by(PROV_ID) %>%
+  mutate(count=1, hosp_prop_medicaid_charity=if_else(STD_PAYOR %in% c(330,340,350,360,370,390,400,410),1,0)) %>%
+  summarise(count=sum(count), hosp_prop_medicaid_charity=sum(hosp_prop_medicaid_charity)) %>%
+  mutate(hosp_prop_medicaid_charity=hosp_prop_medicaid_charity/count) %>%
+  select(PROV_ID, hosp_prop_medicaid_charity)
+
+tt7<- tt6 %>%
+  left_join(hosp_prop_medicaid_charity)
+
+# covid status
+covid<-icd_diag %>%
+  filter(ICD_CODE %in% c("U07.1") & ICD_POA=="Y") %>%
+  group_by(PAT_KEY) %>%
+  mutate(covid=1) %>%
+  summarise(covid=max(covid))
+
+tt8<- tt7 %>%
+  left_join(covid) %>%
+  mutate(covid=if_else(!is.na(covid) & covid==1,1,0))
+
+# nmb use
+nmb_lu<- bill_lu %>%
+  filter(PROD_NAME_METH_DESC %in% c("SUCCINYL CHL PARENTERAL", "PANCURONIUM PARENTERAL", "VECURONIUM PARENTERAL", "ROCURONIUM PARENTERAL", "ATRACURIUM PARENTERAL", "CISATRACURIUM PARENTERAL", "MIVACURIUM PARENTERAL")) %>%
+  mutate(nmb=1)
+
+nmb2<- bill %>%
+  inner_join(nmb_lu) %>%
+  inner_join(tt8 %>% select(PAT_KEY, days_from_imv_to_inhaled, imv_start)) %>%
+  filter(!is.na(nmb) & !is.na(imv_start) & !is.na(days_from_imv_to_inhaled) & SERV_DAY==imv_start+days_from_imv_to_inhaled) %>%
+  group_by(PAT_KEY) %>%
+  summarise(nmb=max(nmb))
+
+tt9<-tt8 %>%
+  left_join(nmb2) %>%
+  mutate(nmb=if_else(!is.na(nmb) & nmb==1,1,0))
+
+tt9$time0<-tt9$days_from_imv_to_inhaled+tt9$imv_start
+
+# hospital level use
+ho<-tt %>%
+  group_by(PROV_ID) %>%
+  mutate(count=1) %>%
+  summarise(epo=sum(epo), nitric=sum(nitric), count=sum(count)) %>%
+  mutate(epop=epo/count, nitricp=nitric/count) %>%
+  mutate(hospital_type=if_else(epop>0 & nitricp==0, "epo", if_else(nitricp>0 & epop==0, "nitric", if_else(nitricp==0 & epop==0, "neither", "both"))))
+
+# limited to hospitals that use treatments and patients that receive treatments
+ho1<- ho %>%
+  filter(hospital_type!="neither") %>%
+  select(PROV_ID, hospital_type) %>%
+  left_join(tt9) %>%
+  filter(epo==1 | nitric==1) 
+
+ho2<- ho %>%
+  filter(hospital_type!="neither")
+```
+
+
+# wrangling outcomes
+```{r wrangling 3 tt}
+i7<-ho1
+
+# outcomes
+## death or hospice (censored at day 28 after first inhaled therapy)
+i7$death_hospice<-0
+i7$death_hospice[i7$DISC_STATUS %in% c(20,40,41,42,50,51)]<-1
+i7$days_to_discharge<-i7$LOS-i7$time0+1 # added one here because LOS starts on day 1
+
+# successful extubation
+i7$imv_duration<-i7$imv_end-i7$time0
+i7$extubation_time<-i7$imv_duration
+i7$extubation_status<-0
+i7$extubation_status[i7$imv_duration<i7$days_to_discharge]<-1
+i7$extubation_status[i7$imv_duration==i7$days_to_discharge & i7$death_hospice==1]<-2
+i7$extubation_status[i7$extubation_time>28]<-0
+i7$extubation_time[i7$extubation_time>28]<-28
+
+## rrt 
+rrt_lu<- bill_lu %>%
+    filter(
+STD_CHG_CODE=="270270000100000" | STD_CHG_CODE=="270270000120000" | STD_CHG_CODE=="270270001550000" | STD_CHG_CODE=="270270007460000" | STD_CHG_CODE=="270270007470000" | STD_CHG_CODE=="270270007480000" | STD_CHG_CODE=="270270007520000" | STD_CHG_CODE=="270270009890000" | STD_CHG_CODE=="270270009900000" | STD_CHG_CODE=="270270011760000" | STD_CHG_CODE=="270270011770000" | STD_CHG_CODE=="270270011780000" | STD_CHG_CODE=="270270012490000" | STD_CHG_CODE=="270270012500000" | STD_CHG_CODE=="270270014050000" | STD_CHG_CODE=="270270014180000" | STD_CHG_CODE=="270270015170000" | STD_CHG_CODE=="270270024250000" | STD_CHG_CODE=="270270024380000" | STD_CHG_CODE=="270270029050000" | STD_CHG_CODE=="270270029640000" | STD_CHG_CODE=="270270029650000" | STD_CHG_CODE=="270270029750000" | STD_CHG_CODE=="270270029760000" | STD_CHG_CODE=="270270030140000" | STD_CHG_CODE=="270270030990000" | STD_CHG_CODE=="270270031000000" | STD_CHG_CODE=="270270032170000" | STD_CHG_CODE=="270270033660000" | STD_CHG_CODE=="270270039660000" | STD_CHG_CODE=="270270039840000" | STD_CHG_CODE=="270270039960000" | STD_CHG_CODE=="270270042540000" | STD_CHG_CODE=="270270042550000" | STD_CHG_CODE=="270270053140000" | STD_CHG_CODE=="270270053510000" | STD_CHG_CODE=="270270054620000" | STD_CHG_CODE=="270270105180000" | STD_CHG_CODE=="270270111040000" | STD_CHG_CODE=="270270112210000" | STD_CHG_CODE=="270270112211000" | STD_CHG_CODE=="270278998700000" | STD_CHG_CODE=="270278998800000") %>%
+  mutate(rrt=1)
+
+rrt<-bill %>%
+  inner_join(rrt_lu) %>%
+  group_by(PAT_KEY) %>%
+  summarise(rrt_start=min(SERV_DAY), rrt_end=max(SERV_DAY))
+
+i8<-i7 %>%
+  left_join(rrt) %>%
+  mutate(rrt=if_else(!is.na(rrt_start) & rrt_start-time0>0,1,0))
+
+i8$time_to_rrt<-i8$rrt_start-i8$time0
+i8$rrt_time<-i8$time_to_rrt
+i8$rrt_time[is.na(i8$rrt_time)]<-i8$days_to_discharge[is.na(i8$rrt_time)]
+
+i8$rrt_status<-0
+i8$rrt_status[i8$time_to_rrt<i8$days_to_discharge & !is.na(i8$time_to_rrt)]<-1
+i8$rrt_status[(i8$time_to_rrt==i8$days_to_discharge & i8$death_hospice==1 & !is.na(i8$time_to_rrt)) | (is.na(i8$time_to_rrt) & i8$death_hospice==1 & i8$days_to_discharge<=28)]<-2
+i8$rrt_status[i8$rrt_time>28]<-0
+i8$rrt_time[i8$rrt_time>28]<-28
+
+
+## cost of treatment
+nitric2<- bill %>%
+  inner_join(med_lu) %>%
+  filter(nitric==1)
+
+inhaled_cost<-epo %>%
+  full_join(nitric2) %>%
+  right_join(i8 %>% select(PAT_KEY, time0)) %>%
+  filter(SERV_DAY>=time0) %>%
+  group_by(PAT_KEY) %>% 
+  summarise(inhaled_cost=sum(BILL_COST))
+
+# total costs
+total_costs<-bill %>%
+  select(PAT_KEY, BILL_COST, SERV_DAY)
+
+total_costs1<-total_costs[1:300000000,] %>%
+  right_join(i8 %>% select(PAT_KEY, time0)) %>%
+  filter(SERV_DAY>=time0) %>%
+  group_by(PAT_KEY) %>%
+  summarise(total_costs=sum(BILL_COST))  
+
+total_costs2<-total_costs[300000001:600000000,] %>%
+  right_join(i8 %>% select(PAT_KEY, time0)) %>%  
+  filter(SERV_DAY>=time0) %>%
+  group_by(PAT_KEY) %>%
+  summarise(total_costs=sum(BILL_COST))  
+
+total_costs<-bind_rows(total_costs1, total_costs2) %>%
+  group_by(PAT_KEY) %>%
+  summarise(total_costs=sum(total_costs))
+
+i9<-i8 %>%
+  left_join(inhaled_cost) %>%
+  left_join(total_costs)
+
+# ecmo initiation yes/no (can't do jsut vv ecmo because icd-10 procedure code only starte in 2018)
+ecmo_lu<- bill_lu %>%
+    filter(
+STD_CHG_CODE=="270270094800000" | STD_CHG_CODE=="270270094810000" | STD_CHG_CODE=="270270109090000" | STD_CHG_CODE=="270272917800000" | STD_CHG_CODE=="270272999930000" | STD_CHG_CODE=="270272999940000" | STD_CHG_CODE=="270272999950000" | STD_CHG_CODE=="270272999960000" | STD_CHG_CODE=="360360339460000" | STD_CHG_CODE=="360360339470000" | STD_CHG_CODE=="360360339480000" | STD_CHG_CODE=="360360339490000" | STD_CHG_CODE=="360360339510000" | STD_CHG_CODE=="360360339520000" | STD_CHG_CODE=="360360339530000" | STD_CHG_CODE=="360360339540000" | STD_CHG_CODE=="360360339550000" | STD_CHG_CODE=="360360339560000" | STD_CHG_CODE=="360360339570000" | STD_CHG_CODE=="360360339580000" | STD_CHG_CODE=="360360339590000" | STD_CHG_CODE=="360360339600000" | STD_CHG_CODE=="360360339610000" | STD_CHG_CODE=="360360339620000" | STD_CHG_CODE=="360360339630000" | STD_CHG_CODE=="360360339640000" | STD_CHG_CODE=="360360368220000" | STD_CHG_CODE=="360490368220000") %>%
+  mutate(ecmo=1)
+
+ecmo<-bill %>%
+  inner_join(ecmo_lu) %>%
+  group_by(PAT_KEY) %>%
+  summarise(ecmo_day=min(SERV_DAY))
+
+
+i10<-i9 %>%
+  left_join(ecmo) %>%
+  mutate(ecmo_outcome=if_else(!is.na(ecmo_day) & ecmo_day>time0 ,1,0))
+```
+
+# pf ratio subset
+```{r pf ratio wrangling}
+sofa<-fread("sofa_score_1_21_2022.csv")
+
+pf<-sofa %>%
+  filter(!is.na(pf_locf)) %>%
+  select(PAT_KEY, day, pf_locf)
+
+pf_outcome<-i10 %>%
+  left_join(pf) %>%
+  filter((day==time0+1) & !is.na(day)) %>%
+  group_by(PAT_KEY) %>%
+  summarize(pf_outcome=max(pf_locf))
+
+pf_baseline<-i10 %>%
+  left_join(pf) %>%
+  filter((day==time0) & !is.na(day)) %>%
+  group_by(PAT_KEY) %>%
+  summarize(pf_baseline=max(pf_locf))
+
+i11<-i10 %>%
+  left_join(pf_outcome) %>%
+  left_join(pf_baseline)
+
+# for sensitivity scores with adjustment
+sofa1<-sofa
+sofa1$respiratory_locf<-0
+sofa1$respiratory_locf[!is.na(sofa1$pf_locf) & sofa1$pf_locf<400]<-1
+sofa1$respiratory_locf[!is.na(sofa1$pf_locf) & sofa1$pf_locf<300]<-2
+sofa1$respiratory_locf[!is.na(sofa1$pf_locf) & sofa1$pf_locf<200]<-3
+sofa1$respiratory_locf[!is.na(sofa1$pf_locf) & sofa1$pf_locf<100]<-4
+```
+
+#95% cutoff subset
+```{r cutoff95}
+ho3<-tt %>%
+  group_by(PROV_ID) %>%
+  mutate(count=1) %>%
+  summarise(epo=sum(epo), nitric=sum(nitric), count=sum(count)) %>%
+  mutate(epop=epo/(epo+nitric), nitricp=nitric/(epo+nitric)) %>%
+  mutate(hospital_type95=if_else(epop>0 & nitricp<0.05, "epo", if_else(nitricp>0 & epop<0.05, "nitric", if_else(nitricp==0 & epop==0, "neither", "both")))) %>%
+  filter(hospital_type95 %in% c("epo", "nitric"))
+
+i12<-i11 %>%
+  left_join(ho3 %>%
+               select(PROV_ID, hospital_type95))
+```
+
+#icu instead of hospital
+```{r icu}
+icu_lu<- bill_lu %>%
+  filter(STD_CHG_DESC %in% c("R&B ICU","R&B ICU COVID19","R&B ICU ISOLATION","R&B MICU (MEDICAL ICU) ISOLATION","R&B MICU (MEDICAL ICU)","R&B SICU  (SURGICAL ICU) ISOLATION","R&B SICU (SURGICAL ICU)","R&B BURN ICU","R&B TRAUMA ICU","R&B TRANSPLANT ICU","R&B CVICU","R&B CVICU ISOLATION","R&B CICU/CCU (CORONARY CARE)","R&B CICU/CCU ISOLATION (CORONARY CARE)","R&B CICU/CCU (CORONARY CARE)COVID19")) %>%
+  select(STD_CHG_CODE, STD_CHG_DESC)
+
+icu<-bill %>%
+  inner_join(icu_lu) %>%
+  group_by(PAT_KEY) %>%
+  arrange(SERV_DAY, .by_group=T) %>%
+  slice(1L) %>%
+  select(PAT_KEY, icu=STD_CHG_DESC)
+
+icu1<- i11 %>%
+  inner_join(icu)
+
+distinct_icus<-icu1 %>%
+  group_by(PROV_ID, icu) %>%
+  mutate(count=1) %>%
+  summarise(count=sum(count))
+
+distinct_icus$icu_id<-1:nrow(distinct_icus)
+
+icu2<-icu1 %>%
+  left_join(distinct_icus %>%
+              select(PROV_ID, icu, icu_id))
+
+# hospital use
+icu3<-icu2 %>%
+  group_by(icu_id) %>%
+  mutate(count=1, epo=if_else(!is.na(epo) & epo==1,1,0), nitric=if_else(!is.na(nitric) & nitric==1,1,0)) %>%
+  summarise(epo=sum(epo), nitric=sum(nitric), count=sum(count), icu=first(icu)) %>%
+  mutate(epop=epo/count, nitricp=nitric/count) %>%
+  mutate(icu_type=if_else(epop>0 & nitricp==0, "epo", if_else(nitricp>0 & epop==0, "nitric", if_else(nitricp==0 & epop==0, "neither", "both"))))
+
+icu4<-icu3 %>%
+  filter(icu_type %in% c("epo", "nitric")) %>%
+  select(icu_id, icu, icu_type) %>%
+  left_join(icu2)
+
+i13<-i12 %>%
+  left_join(icu4 %>% select(icu_type, icu_id, icu, PROV_ID, PAT_KEY))  %>%
+  mutate(age=AGE, female_sex=if_else(GENDER=="F",1,0))
+
+```
+
+# use of each therapy over time
+```{r use over time}
+epo<- bill %>%
+  inner_join(med_lu) %>%
+  group_by(PAT_KEY, SERV_DAY) %>%
+  summarize(epo=max(epo)) %>%
+  filter(epo==1)
+
+inhaled<- bill %>%
+  inner_join(med_lu) %>%
+  group_by(PAT_KEY, SERV_DAY) %>%
+  summarize(inhaled=max(inhaled)) %>%
+  filter(inhaled==1)
+
+epoi<-epo %>%
+  inner_join(inhaled)
+
+nitric<- bill %>%
+  inner_join(med_lu) %>%
+  group_by(PAT_KEY, SERV_DAY) %>%
+  summarize(nitric=max(nitric)) %>%
+  filter(nitric==1)
+
+inh<-epoi %>%
+  full_join(nitric)
+
+san<-i13 %>%
+  select(PAT_KEY, time0, first_inhaled_therapy, extubation_time, extubation_status) %>%
+  left_join(inh) %>%
+  mutate(therapy=if_else(!is.na(epo) & is.na(nitric),"bepo", if_else(is.na(epo) & !is.na(nitric), "cnitric", "aboth")))
+
+san1<- san %>%
+  filter(SERV_DAY>=time0 & SERV_DAY<=time0+6) %>%
+  mutate(days_from_time0=SERV_DAY-time0) %>%
+  ungroup() %>%
+  select(PAT_KEY, days_from_time0, therapy) %>%
+  group_by(PAT_KEY, days_from_time0) %>%
+  summarise(therapy=first(therapy))
+
+day0<-san1 %>%
+  group_by(PAT_KEY) %>%
+  summarise(days_from_time0=0)
+  
+day1<-san1 %>%
+  group_by(PAT_KEY) %>%
+  summarise(days_from_time0=1)
+
+day2<-san1 %>%
+  group_by(PAT_KEY) %>%
+  summarise(days_from_time0=2)
+
+day3<-san1 %>%
+  group_by(PAT_KEY) %>%
+  summarise(days_from_time0=3)
+
+day4<-san1 %>%
+  group_by(PAT_KEY) %>%
+  summarise(days_from_time0=4)
+
+day5<-san1 %>%
+  group_by(PAT_KEY) %>%
+  summarise(days_from_time0=5)
+
+day6<-san1 %>%
+  group_by(PAT_KEY) %>%
+  summarise(days_from_time0=6)
+
+san2<-day0 %>%
+  full_join(day1) %>%
+  full_join(day2) %>%
+  full_join(day3) %>%
+  full_join(day4) %>%
+  full_join(day5) %>%
+  full_join(day6) 
+  
+san3<- san2 %>%
+  left_join(san1) %>%
+  left_join(san %>% select(PAT_KEY, extubation_status, extubation_time) %>% group_by(PAT_KEY) %>% slice(1L))
+
+san3$therapy[is.na(san3$therapy) & san3$extubation_time<=san3$days_from_time0 & san3$extubation_status==1]<-"eExtubated"
+san3$therapy[is.na(san3$therapy) & san3$extubation_time<=san3$days_from_time0 & san3$extubation_status==2]<-"fDied"
+san3$therapy[is.na(san3$therapy)]<-"dNo therapy"
+
+ggplot(san3,
+       aes(x = days_from_time0, stratum = therapy, alluvium = PAT_KEY,
+           fill = therapy, label = therapy)) +
+  scale_fill_brewer(type = "qual", palette = "Set2") +
+  geom_flow(stat = "alluvium", lode.guidance = "frontback") +
+  geom_stratum() +
+  theme(legend.position = "bottom")+
+  xlab("Days after inhaled therapy initiation")+
+  scale_x_continuous(breaks = c(0,1,2,3,4,5,6))+
+  scale_fill_discrete(labels=c("Both vasodilators", "iEpi", "iNO", "No longer receiving vasodilator", "No longer receiving IMV", "Death"), name="")+
+  theme_bw() +
+  theme(panel.border = element_blank(), panel.grid.major = element_blank(),
+  panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"))
+
+# number of patients who switched therapy
+san4<-san[(san$first_inhaled_therapy=="epo" & !is.na(san$nitric)) | (san$first_inhaled_therapy=="nitric" & !is.na(san$epo)),] %>%
+  group_by(PAT_KEY) %>%
+  slice(1L)
+```
+
+
+# target trial emulation  
+## wrangling outcomes
+```{r wranglingtt}
+table(i13$first_inhaled_therapy)
+prop.table(table(i13$first_inhaled_therapy))
+
+summary(i13$imv_start)
+summary(i13$days_from_imv_to_inhaled)
+
+summary(i13$nitric_days)
+summary(i13$epo_days)
+```
+
+```{r wrangling2}
+hospital_level_use<-i13 %>%
+ group_by(PROV_ID) %>%
+  mutate(count=1) %>%
+  summarise(epo=sum(epo), nitric=sum(nitric), count=sum(count)) %>%
+  mutate(epop=epo/count, nitricp=nitric/count) %>%
+  mutate(hospital_type=if_else(epop>0 & nitricp==0, "epo", if_else(nitricp>0 & epop==0, "nitric", if_else(nitricp==0 & epop==0, "neither", "both"))))
+
+# primary cohort
+p<-i13[i13$hospital_type %in% c("nitric", "epo"),]
+
+# first 48hours
+p2d<-p %>% filter(time0<=2)
+
+p2d2<-p2d %>% 
+  inner_join(sofa1) %>%
+  filter(time0==day) %>%
+  group_by(PAT_KEY) %>%
+  slice(1L)
+
+p3<-p %>%
+  filter(!is.na(pf_baseline) & !is.na(pf_outcome)) %>%
+  mutate(pf_baseline=round(pf_baseline,0), pf_outcome=round(pf_outcome,0))
+
+
+p4<-p %>%
+  inner_join(sofa1) %>%
+  filter(time0==day) %>%
+  group_by(PAT_KEY) %>%
+  slice(1L)
+
+# full cohort with adjustment
+f<-i13[i13$first_inhaled_therapy!="both",]
+f4<-f %>%
+  inner_join(sofa1) %>%
+  filter(time0==day) %>%
+  group_by(PAT_KEY) %>%
+  slice(1L)
+
+# icus
+i<-i13[!is.na(i13$icu_type) & i13$icu_type %in% c("nitric", "epo") & i13$first_inhaled_therapy!="both",]
+
+ii<-i %>%
+  inner_join(sofa1) %>%
+  filter(time0==day) %>%
+  group_by(PAT_KEY) %>%
+  slice(1L)
+```
+
+
+# MOR/ICC 
+```{r MOR_ICC}
+m<-i13[i13$first_inhaled_therapy!="both",]
+
+m$tx<-0
+m$tx[m$first_inhaled_therapy=="nitric"]<-1
+
+table(m$tx)
+
+mor_mod<-glmer(tx~PROV_REGION+factor(year)+hospital_beds+scale(hosp_prop_medicaid_charity)+TEACHING+female_sex+scale(age)+RACE+insurance+elix+cardiovascular_dombrovskiy+neurologic_dombrovskiy+hematologic_dombrovskiy+hepatic_dombrovskiy+renal_dombrovskiy+nmb+(1|PROV_ID), m, family="binomial", control=glmerControl(optimizer="bobyqa", optCtrl=list(maxfun=2e9)))
+
+#mor
+t<- ranef(mor_mod,condVar = TRUE)
+est<-as.numeric(unlist(t$PROV_ID))
+var<- as.numeric(unlist(attr(t$PROV_ID,"postVar")))
+mor_boot<- c()
+for(i in 1:1000){
+drw<- rnorm(n = length(est),mean = est,sd = sqrt(var))
+s<- combn(drw,2)
+mor_boot<- c(mor_boot, median(exp(abs(s[1,]- s[2,]))))}
+mor<-quantile(mor_boot, c(.025,.5,.975))
+
+summary(mor_mod)
+effect<-round(exp(fixef(mor_mod)),2)
+ci<-round(exp(confint(mor_mod, method="Wald")),2)[-1,]
+
+tab<-data.frame(effect, ci) %>%
+  rename(lower=2, upper=3) %>%
+  mutate(effect=round(effect,2), lower=round(lower,2), upper=round(upper,2))
+
+sjstats::icc(mor_mod)
+
+```
+
+
+
+## table 1
+```{r table1pp}
+i13_labs<-i13 %>%
+  inner_join(sofa1) %>%
+  filter(time0==day) %>%
+  group_by(PAT_KEY) %>%
+  slice(1L)
+
+myVars<-c("age", "female_sex", "RACE", "insurance", "elix", "covid", "nmb", "cardiovascular_dombrovskiy", "neurologic_dombrovskiy", "hematologic_dombrovskiy", "hepatic_dombrovskiy", "renal_dombrovskiy",  "year", "PROV_REGION", "hospital_beds", "TEACHING", "hosp_prop_medicaid_charity", "imv_start", "days_from_imv_to_inhaled", "epo_days", "nitric_days", "pf_baseline", "cardiovascular_locf", "respiratory_locf", "coagulation_locf", "liver_locf", "kidneys_locf")
+
+catVars<-c("female_sex", "RACE", "insurance", "covid", "nmb", "cardiovascular_dombrovskiy", "neurologic_dombrovskiy", "hematologic_dombrovskiy", "hepatic_dombrovskiy", "renal_dombrovskiy", "year", "PROV_REGION", "hospital_beds", "TEACHING")
+
+nonnormVars<-c("age", "elix", "pf_baseline", "hosp_prop_medicaid_charity", "imv_start", "days_from_imv_to_inhaled", "epo_days", "nitric_days", "pf_baseline", "cardiovascular_locf", "respiratory_locf", "coagulation_locf", "liver_locf", "kidneys_locf")
+
+tab <- CreateTableOne(vars = myVars, data = i13, factorVars = catVars, test=F, strata="hospital_type")
+print(tab, missing=T, nonnormal = nonnormVars)
+
+tab_labs <- CreateTableOne(vars = myVars, data = i13_labs, factorVars = catVars, test=F, strata="hospital_type")
+print(tab_labs, missing=T, nonnormal = nonnormVars)
+```
+
+## outcomes of med use
+```{r outcomes of med use pp}
+nrow(tt1)
+nrow(tt)
+
+nrow(tt1)/nrow(tt)
+
+table(tt$first_inhaled_therapy)
+prop.table(table(tt$first_inhaled_therapy))
+
+ho4<-i13 %>%
+  group_by(PROV_ID) %>%
+  summarise(hospital_type=first(hospital_type)) %>%
+  left_join(tt) %>%
+  group_by(PROV_ID) %>%
+  mutate(count=1) %>%
+  summarise(epo=sum(epo), nitric=sum(nitric), count=sum(count)) %>%
+  filter(count>=25) %>%
+  mutate(epop=epo/count, nitricp=nitric/count) %>%
+  mutate(hospital_type=if_else(epop>0 & nitricp==0, "epo", if_else(nitricp>0 & epop==0, "nitric", if_else(nitricp==0 & epop==0, "neither", "both"))))
+
+ino_hosp<-ho4 %>%
+  filter(hospital_type=="nitric")
+
+summary(ino_hosp$nitricp)
+
+epo_hosp<-ho4 %>%
+  filter(hospital_type=="epo")
+
+summary(epo_hosp$epop)
+
+figure2a<-ggplot(ino_hosp, aes(x=reorder(PROV_ID, nitricp), y=nitricp*100))+geom_bar(stat="identity")+
+  coord_cartesian(ylim=c(0,10))+
+  xlab("Hospital")+
+  ylab("Percentage of patients receiving inhaled nitric oxide")+
+  theme_bw() +
+  theme(panel.border = element_blank(), panel.grid.major = element_blank(),
+  panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"))+
+  theme(axis.text.x = element_blank(), axis.ticks = element_blank())
+
+figure2b<-ggplot(epo_hosp, aes(x=reorder(PROV_ID, epop), y=epop*100))+geom_bar(stat="identity")+
+  coord_cartesian(ylim=c(0,10))+
+  xlab("Hospital")+
+  ylab("Percentage of patients receiving inhaled epoprostenol")+
+  theme_bw() +
+  theme(panel.border = element_blank(), panel.grid.major = element_blank(),
+  panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"))+
+  theme(axis.text.x = element_blank(), axis.ticks = element_blank())
+
+ggarrange(figure2a, figure2b, labels=c("A","B"), ncol=1)
+
+figure2c<-ggplot(hospital_level_use, aes(x=reorder(PROV_ID, nitricp), y=nitricp*100))+geom_bar(stat="identity")+
+  xlab("Hospital")+
+  ylab("Percentage of patients receiving inhaled nitric oxide")+
+  theme_bw() +
+  theme(panel.border = element_blank(), panel.grid.major = element_blank(),
+  panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"))+
+  theme(axis.text.x = element_blank(), axis.ticks = element_blank())
+
+hospital_level_use2<- hospital_level_use %>%
+  pivot_longer(c(epop, nitricp), names_to="type", values_to = "prop") %>%
+  mutate(prop2=if_else(type=="epop", -prop, prop))
+
+figure2d<-ggplot(hospital_level_use2, aes(x=reorder(PROV_ID, prop2), y=prop2*100, fill=type))+geom_bar(stat="identity")+
+  xlab("Hospital")+
+  ylab("iEpo (%)                    iNO (%)")+
+  theme_bw() +
+  theme(panel.border = element_blank(), panel.grid.major = element_blank(),
+  panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"))+
+  theme(axis.text.x = element_blank(), axis.ticks = element_blank(), legend.position = "none")+
+  scale_y_continuous(labels=c(100,50,0,50,100))
+```
+
+ 
+## table 1s
+```{r table1 tt}
+myVars<-c("age", "female_sex", "RACE", "insurance", "elix", "covid", "nmb", "cardiovascular_dombrovskiy", "neurologic_dombrovskiy", "hematologic_dombrovskiy", "hepatic_dombrovskiy", "renal_dombrovskiy",  "year", "PROV_REGION", "hospital_beds", "TEACHING", "hosp_prop_medicaid_charity", "imv_start", "days_from_imv_to_inhaled", "epo_days", "nitric_days", "pf_baseline", "cardiovascular_locf", "respiratory_locf", "coagulation_locf", "liver_locf", "kidneys_locf")
+
+catVars<-c("female_sex", "RACE", "insurance", "covid", "nmb", "cardiovascular_dombrovskiy", "neurologic_dombrovskiy", "hematologic_dombrovskiy", "hepatic_dombrovskiy", "renal_dombrovskiy", "year", "PROV_REGION", "hospital_beds", "TEACHING")
+
+nonnormVars<-c("age", "elix", "pf_baseline", "hosp_prop_medicaid_charity", "imv_start", "days_from_imv_to_inhaled", "epo_days", "nitric_days", "pf_baseline", "cardiovascular_locf", "respiratory_locf", "coagulation_locf", "liver_locf", "kidneys_locf")
+
+tabp <- CreateTableOne(vars = myVars, data = p, factorVars = catVars, test=F, strata="first_inhaled_therapy")
+print(tabp, missing=T, nonnormal = nonnormVars)
+
+tabf <- CreateTableOne(vars = myVars, data = f, factorVars = catVars, test=F, strata="first_inhaled_therapy")
+print(tabf, missing=T, nonnormal = nonnormVars)
+
+tabb <- CreateTableOne(vars = myVars, data = b, factorVars = catVars, test=F, strata="first_inhaled_therapy")
+print(tabb, missing=T, nonnormal = nonnormVars)
+
+tabn <- CreateTableOne(vars = myVars, data = n, factorVars = catVars, test=F, strata="first_inhaled_therapy")
+print(tabn, missing=T, nonnormal = nonnormVars)
+
+tabi <- CreateTableOne(vars = myVars, data = i, factorVars = catVars, test=F, strata="first_inhaled_therapy")
+print(tabi, missing=T, nonnormal = nonnormVars)
+
+tabii <- CreateTableOne(vars = myVars, data = ii, factorVars = catVars, test=F, strata="first_inhaled_therapy")
+print(tabii, missing=T, nonnormal = nonnormVars)
+
+tabp2d <- CreateTableOne(vars = myVars, data = p2d, factorVars = catVars, test=F, strata="first_inhaled_therapy")
+print(tabp2d, missing=T, nonnormal = nonnormVars)
+
+tabp2d2 <- CreateTableOne(vars = myVars, data = p2d2, factorVars = catVars, test=F, strata="first_inhaled_therapy")
+print(tabp2d2, missing=T, nonnormal = nonnormVars)
+
+tabp4 <- CreateTableOne(vars = myVars, data = p4, factorVars = catVars, test=F, strata="first_inhaled_therapy")
+print(tabp4, missing=T, nonnormal = nonnormVars)
+```
+
+
+# time to treatment graphs
+```{r time to tx}
+ggplot(p, aes(x=days_from_imv_to_inhaled, color=factor(first_inhaled_therapy, labels=c("Epoprostenol", "iNO"))))+
+  geom_density()+
+  coord_cartesian(xlim=c(0,7))+
+  xlab("Time from IMV initiation to therapy (days)")+
+  ylab("Probability")+
+  theme_bw() +
+  theme(panel.border = element_blank(), panel.grid.major = element_blank(),
+  panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"))+
+  scale_colour_discrete("Medication")+
+  theme(legend.position = c(0.8, 0.8))
+
+ggplot(f, aes(x=days_from_imv_to_inhaled, color=factor(first_inhaled_therapy, labels=c("Epoprostenol", "iNO"))))+
+  geom_density()+
+  coord_cartesian(xlim=c(0,7))+
+  xlab("Time from IMV initiation to therapy (days)")+
+  ylab("Probability")+
+  theme_bw() +
+  theme(panel.border = element_blank(), panel.grid.major = element_blank(),
+  panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"))+
+  scale_colour_discrete("Medication")+
+  theme(legend.position = c(0.8, 0.8))
+
+ggplot(b1, aes(x=days_from_imv_to_inhaled, color=factor(first_inhaled_therapy, labels=c("Epoprostenol", "iNO"))))+
+  geom_density()+
+  coord_cartesian(xlim=c(0,7))+
+  xlab("Time from IMV initiation to therapy (days)")+
+  ylab("Probability")+
+  theme_bw() +
+  theme(panel.border = element_blank(), panel.grid.major = element_blank(),
+  panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"))+
+  scale_colour_discrete("Medication")+
+  theme(legend.position = c(0.8, 0.8))
+
+ggplot(n, aes(x=days_from_imv_to_inhaled, color=factor(first_inhaled_therapy, labels=c("Epoprostenol", "iNO"))))+
+  geom_density()+
+  coord_cartesian(xlim=c(0,7))+
+  xlab("Time from IMV initiation to therapy (days)")+
+  ylab("Probability")+
+  theme_bw() +
+  theme(panel.border = element_blank(), panel.grid.major = element_blank(),
+  panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"))+
+  scale_colour_discrete("Medication")+
+  theme(legend.position = c(0.8, 0.8))
+
+ggplot(i, aes(x=days_from_imv_to_inhaled, color=factor(first_inhaled_therapy, labels=c("Epoprostenol", "iNO"))))+
+  geom_density()+
+  coord_cartesian(xlim=c(0,7))+
+  xlab("Time from IMV initiation to therapy (days)")+
+  ylab("Probability")+
+  theme_bw() +
+  theme(panel.border = element_blank(), panel.grid.major = element_blank(),
+  panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"))+
+  scale_colour_discrete("Medication")+
+  theme(legend.position = c(0.8, 0.8))
+```
+
+#### successful extubation
+# primary cohort
+```{r successful extubation p}
+table(p$first_inhaled_therapy)
+round(table(p$extubation_status, p$first_inhaled_therapy),3)
+round(prop.table(table(p$extubation_status, p$first_inhaled_therapy),2),3)*100
+
+patient_days<-p %>%
+  group_by(first_inhaled_therapy) %>%
+  summarise(extubation_time=sum(extubation_time))
+
+# no frailty term - unadjusted
+ci_fit<-cuminc(p$extubation_time, p$extubation_status, group=factor(p$first_inhaled_therapy))
+ggcompetingrisks(ci_fit, xlab = "Days", ylab="Cumulative incidence of event", multiple_panels = FALSE)
+
+# create dummy variable for exposure with 1 as nitric oxide
+covs1 <- model.matrix(~ first_inhaled_therapy, data = p)[, -1]
+covs1a <- model.matrix(~ first_inhaled_therapy+PROV_REGION+factor(year)+hospital_beds+scale(hosp_prop_medicaid_charity)+TEACHING, data = p)[, -1]
+covs2a <- model.matrix(~ first_inhaled_therapy+PROV_REGION+factor(year)+hospital_beds+scale(hosp_prop_medicaid_charity)+TEACHING+female_sex+scale(age)+RACE+insurance+elix+cardiovascular_dombrovskiy+neurologic_dombrovskiy+hematologic_dombrovskiy+hepatic_dombrovskiy+renal_dombrovskiy+nmb, data = p)[,-1]
+
+# clustered
+# unadjusted
+sch<-crr(ftime = p$extubation_time, fstatus = p$extubation_status, cov1 = covs1, failcode = 1)
+cor.test(x=sch$res, y=sch$uftime, method="spearman")
+sch<-crr(ftime = p$extubation_time, fstatus = p$extubation_status, cov1 = covs1, failcode = 2)
+cor.test(x=sch$res, y=sch$uftime, method="spearman")
+
+sch<-crr(ftime = p$extubation_time, fstatus = p$extubation_status, cov1 = covs2a,  failcode = 1)
+cor.test(x=sch$res[,1], y=sch$uftime, method="spearman")
+sch<-crr(ftime = p$extubation_time, fstatus = p$extubation_status, cov1 = covs2a, failcode = 2)
+cor.test(x=sch$res[,1], y=sch$uftime, method="spearman")
+
+
+shr_fit1p <- crrc(ftime = p$extubation_time, fstatus = p$extubation_status, cov1 = covs1, failcode = 1, cluster=p$PROV_ID)
+shr_fit2p <- crrc(ftime = p$extubation_time, fstatus = p$extubation_status, cov1 = covs1, failcode = 2, cluster=p$PROV_ID)
+
+shr_fit5p <- crrc(ftime = p$extubation_time, fstatus = p$extubation_status, cov1 = covs2a,failcode = 1, cluster=p$PROV_ID)
+shr_fit6p <- crrc(ftime = p$extubation_time, fstatus = p$extubation_status, cov1 = covs2a,failcode = 2, cluster=p$PROV_ID)
+```
+
+# primary with granular labs
+```{r primary labs}
+table(p4$first_inhaled_therapy)
+round(table(p4$extubation_status, p4$first_inhaled_therapy),3)
+round(prop.table(table(p4$extubation_status, p4$first_inhaled_therapy),2),3)*100
+
+patient_days<-p4 %>%
+  group_by(first_inhaled_therapy) %>%
+  summarise(extubation_time=sum(extubation_time))
+
+# no frailty term - unadjusted
+ci_fit<-cuminc(p4$extubation_time, p4$extubation_status, group=factor(p4$first_inhaled_therapy))
+ggcompetingrisks(ci_fit, xlab = "Days", ylab="Cumulative incidence of event", multiple_panels = FALSE)
+
+# create dummy variable for exposure with 1 as nitric oxide
+covs1 <- model.matrix(~ first_inhaled_therapy, data = p4)[, -1]
+covs1a <- model.matrix(~ first_inhaled_therapy+PROV_REGION+factor(year)+hospital_beds+scale(hosp_prop_medicaid_charity)+TEACHING, data = p4)[, -1]
+covs2a <- model.matrix(~ first_inhaled_therapy+PROV_REGION+factor(year)+hospital_beds+scale(hosp_prop_medicaid_charity)+TEACHING+female_sex+scale(age)+RACE+insurance+elix+cardiovascular_dombrovskiy+neurologic_dombrovskiy+hematologic_dombrovskiy+hepatic_dombrovskiy+renal_dombrovskiy+nmb+respiratory_locf+cardiovascular_locf+liver_locf+coagulation_locf+kidneys_locf, data = p4)[,-1]
+
+# clustered
+# unadjusted
+sch<-crr(ftime = p4$extubation_time, fstatus = p4$extubation_status, cov1 = covs1, failcode = 1)
+cor.test(x=sch$res, y=sch$uftime, method="spearman")
+sch<-crr(ftime = p4$extubation_time, fstatus = p4$extubation_status, cov1 = covs1, failcode = 2)
+cor.test(x=sch$res, y=sch$uftime, method="spearman")
+
+sch<-crr(ftime = p4$extubation_time, fstatus = p4$extubation_status, cov1 = covs2a,  failcode = 1)
+cor.test(x=sch$res[,1], y=sch$uftime, method="spearman")
+sch<-crr(ftime = p4$extubation_time, fstatus = p4$extubation_status, cov1 = covs2a, failcode = 2)
+cor.test(x=sch$res[,1], y=sch$uftime, method="spearman")
+
+
+shr_fit1p <- crrc(ftime = p4$extubation_time, fstatus = p4$extubation_status, cov1 = covs1, failcode = 1, cluster=p4$PROV_ID)
+shr_fit2p <- crrc(ftime = p4$extubation_time, fstatus = p4$extubation_status, cov1 = covs1, failcode = 2, cluster=p4$PROV_ID)
+
+shr_fit5p <- crrc(ftime = p4$extubation_time, fstatus = p4$extubation_status, cov1 = covs2a,failcode = 1, cluster=p4$PROV_ID)
+shr_fit6p <- crrc(ftime = p4$extubation_time, fstatus = p4$extubation_status, cov1 = covs2a,failcode = 2, cluster=p4$PROV_ID)
+```
+
+
+
+
+# secondary cohort (All hospitals)
+```{r successful extubation f}
+table(f$first_inhaled_therapy)
+round(table(f$extubation_status, f$first_inhaled_therapy),3)
+round(prop.table(table(f$extubation_status, f$first_inhaled_therapy),2),3)*100
+
+patient_days<-f %>%
+  group_by(first_inhaled_therapy) %>%
+  summarise(extubation_time=sum(extubation_time))
+
+# no frailty term - unadjusted
+ci_fit<-cuminc(f$extubation_time, f$extubation_status, group=factor(f$first_inhaled_therapy))
+ggcompetingrisks(ci_fit, xlab = "Days", ylab="Cumulative incidence of event", multiple_panels = FALSE)
+
+# create dummy variable for exposure with 1 as nitric oxide
+covs1 <- model.matrix(~ first_inhaled_therapy, data = f)[, -1]
+covs1a <- model.matrix(~ first_inhaled_therapy+PROV_REGION+factor(year)+hospital_beds+scale(hosp_prop_medicaid_charity)+TEACHING, data = f)[, -1]
+covs2a <- model.matrix(~ first_inhaled_therapy+PROV_REGION+factor(year)+hospital_beds+scale(hosp_prop_medicaid_charity)+TEACHING+female_sex+scale(age)+RACE+insurance+elix+cardiovascular_dombrovskiy+neurologic_dombrovskiy+hematologic_dombrovskiy+hepatic_dombrovskiy+renal_dombrovskiy+nmb, data = f)[,-1]
+
+# clustered
+# unadjusted
+sch<-crr(ftime = f$extubation_time, fstatus = f$extubation_status, cov1 = covs1, failcode = 1)
+cor.test(x=sch$res, y=sch$uftime, method="spearman")
+sch<-crr(ftime = f$extubation_time, fstatus = f$extubation_status, cov1 = covs1, failcode = 2)
+cor.test(x=sch$res, y=sch$uftime, method="spearman")
+
+sch<-crr(ftime = f$extubation_time, fstatus = f$extubation_status, cov1 = covs2a,  failcode = 1)
+cor.test(x=sch$res[,1], y=sch$uftime, method="spearman")
+sch<-crr(ftime = f$extubation_time, fstatus = f$extubation_status, cov1 = covs2a, failcode = 2)
+cor.test(x=sch$res[,1], y=sch$uftime, method="spearman")
+
+
+shr_fit1p <- crrc(ftime = f$extubation_time, fstatus = f$extubation_status, cov1 = covs1, failcode = 1, cluster=f$PROV_ID)
+shr_fit2p <- crrc(ftime = f$extubation_time, fstatus = f$extubation_status, cov1 = covs1, failcode = 2, cluster=f$PROV_ID)
+
+shr_fit5p <- crrc(ftime = f$extubation_time, fstatus = f$extubation_status, cov1 = covs2a,failcode = 1, cluster=f$PROV_ID)
+shr_fit6p <- crrc(ftime = f$extubation_time, fstatus = f$extubation_status, cov1 = covs2a,failcode = 2, cluster=f$PROV_ID)
+```
+
+# secondary with granular labs
+```{r secondary labs}
+table(f4$first_inhaled_therapy)
+round(table(f4$extubation_status, f4$first_inhaled_therapy),3)
+round(prop.table(table(f4$extubation_status, f4$first_inhaled_therapy),2),3)*100
+
+patient_days<-f4 %>%
+  group_by(first_inhaled_therapy) %>%
+  summarise(extubation_time=sum(extubation_time))
+
+# no frailty term - unadjusted
+ci_fit<-cuminc(f4$extubation_time, f4$extubation_status, group=factor(f4$first_inhaled_therapy))
+ggcompetingrisks(ci_fit, xlab = "Days", ylab="Cumulative incidence of event", multiple_panels = FALSE)
+
+# create dummy variable for exposure with 1 as nitric oxide
+covs1 <- model.matrix(~ first_inhaled_therapy, data = f4)[, -1]
+covs1a <- model.matrix(~ first_inhaled_therapy+PROV_REGION+factor(year)+hospital_beds+scale(hosp_prop_medicaid_charity)+TEACHING, data = f4)[, -1]
+covs2a <- model.matrix(~ first_inhaled_therapy+PROV_REGION+factor(year)+hospital_beds+scale(hosp_prop_medicaid_charity)+TEACHING+female_sex+scale(age)+RACE+insurance+elix+cardiovascular_dombrovskiy+neurologic_dombrovskiy+hematologic_dombrovskiy+hepatic_dombrovskiy+renal_dombrovskiy+nmb+respiratory_locf+cardiovascular_locf+liver_locf+coagulation_locf+kidneys_locf, data = f4)[,-1]
+
+# clustered
+# unadjusted
+sch<-crr(ftime = f4$extubation_time, fstatus = f4$extubation_status, cov1 = covs1, failcode = 1)
+cor.test(x=sch$res, y=sch$uftime, method="spearman")
+sch<-crr(ftime = f4$extubation_time, fstatus = f4$extubation_status, cov1 = covs1, failcode = 2)
+cor.test(x=sch$res, y=sch$uftime, method="spearman")
+
+sch<-crr(ftime = f4$extubation_time, fstatus = f4$extubation_status, cov1 = covs2a,  failcode = 1)
+cor.test(x=sch$res[,1], y=sch$uftime, method="spearman")
+sch<-crr(ftime = f4$extubation_time, fstatus = f4$extubation_status, cov1 = covs2a, failcode = 2)
+cor.test(x=sch$res[,1], y=sch$uftime, method="spearman")
+
+
+shr_fit1p <- crrc(ftime = f4$extubation_time, fstatus = f4$extubation_status, cov1 = covs1, failcode = 1, cluster=f4$PROV_ID)
+shr_fit2p <- crrc(ftime = f4$extubation_time, fstatus = f4$extubation_status, cov1 = covs1, failcode = 2, cluster=f4$PROV_ID)
+
+shr_fit5p <- crrc(ftime = f4$extubation_time, fstatus = f4$extubation_status, cov1 = covs2a,failcode = 1, cluster=f4$PROV_ID)
+shr_fit6p <- crrc(ftime = f4$extubation_time, fstatus = f4$extubation_status, cov1 = covs2a,failcode = 2, cluster=f4$PROV_ID)
+```
+
+
+
+# primary cohort - first 2 days for exposure
+```{r successful extubation p2d}
+table(p2d$first_inhaled_therapy)
+round(table(p2d$extubation_status, p2d$first_inhaled_therapy),3)
+round(prop.table(table(p2d$extubation_status, p2d$first_inhaled_therapy),2),3)*100
+
+patient_days<-p2d %>%
+  group_by(first_inhaled_therapy) %>%
+  summarise(extubation_time=sum(extubation_time))
+
+# no frailty term - unadjusted
+ci_fit<-cuminc(p$extubation_time, p$extubation_status, group=factor(p$first_inhaled_therapy))
+ggcompetingrisks(ci_fit, xlab = "Days", ylab="Cumulative incidence of event", multiple_panels = FALSE)
+
+# create dummy variable for exposure with 1 as nitric oxide
+covs1 <- model.matrix(~ first_inhaled_therapy, data = p2d)[, -1]
+covs1a <- model.matrix(~ first_inhaled_therapy+PROV_REGION+factor(year)+hospital_beds+scale(hosp_prop_medicaid_charity)+TEACHING, data = p2d)[, -1]
+covs2a <- model.matrix(~ first_inhaled_therapy+PROV_REGION+factor(year)+hospital_beds+scale(hosp_prop_medicaid_charity)+TEACHING+female_sex+scale(age)+RACE+insurance+elix+cardiovascular_dombrovskiy+neurologic_dombrovskiy+hematologic_dombrovskiy+hepatic_dombrovskiy+renal_dombrovskiy+nmb, data = p2d)[,-1]
+
+# clustered
+# unadjusted
+sch<-crr(ftime = p2d$extubation_time, fstatus = p2d$extubation_status, cov1 = covs1, failcode = 1)
+cor.test(x=sch$res, y=sch$uftime, method="spearman")
+sch<-crr(ftime = p2d$extubation_time, fstatus = p2d$extubation_status, cov1 = covs1, failcode = 2)
+cor.test(x=sch$res, y=sch$uftime, method="spearman")
+
+sch<-crr(ftime = p2d$extubation_time, fstatus = p2d$extubation_status, cov1 = covs2a,  failcode = 1)
+cor.test(x=sch$res[,1], y=sch$uftime, method="spearman")
+sch<-crr(ftime = p2d$extubation_time, fstatus = p2d$extubation_status, cov1 = covs2a, failcode = 2)
+cor.test(x=sch$res[,1], y=sch$uftime, method="spearman")
+
+
+shr_fit1p <- crrc(ftime = p2d$extubation_time, fstatus = p2d$extubation_status, cov1 = covs1, failcode = 1, cluster=p2d$PROV_ID)
+shr_fit2p <- crrc(ftime = p2d$extubation_time, fstatus = p2d$extubation_status, cov1 = covs1, failcode = 2, cluster=p2d$PROV_ID)
+
+shr_fit5p <- crrc(ftime = p2d$extubation_time, fstatus = p2d$extubation_status, cov1 = covs2a,failcode = 1, cluster=p2d$PROV_ID)
+shr_fit6p <- crrc(ftime = p2d$extubation_time, fstatus = p2d$extubation_status, cov1 = covs2a,failcode = 2, cluster=p2d$PROV_ID)
+```
+
+
+
+
+
+# icus cohort 
+```{r successful extubation i}
+table(i$first_inhaled_therapy)
+round(table(i$extubation_status, i$first_inhaled_therapy),3)
+round(prop.table(table(i$extubation_status, i$first_inhaled_therapy),2),3)*100
+
+patient_days<-i %>%
+  group_by(first_inhaled_therapy) %>%
+  summarise(extubation_time=sum(extubation_time))
+
+# no frailty term - unadjusted
+ci_fit<-cuminc(p$extubation_time, p$extubation_status, group=factor(p$first_inhaled_therapy))
+ggcompetingrisks(ci_fit, xlab = "Days", ylab="Cumulative incidence of event", multiple_panels = FALSE)
+
+# create dummy variable for exposure with 1 as nitric oxide
+covs1 <- model.matrix(~ first_inhaled_therapy, data = i)[, -1]
+covs1a <- model.matrix(~ first_inhaled_therapy+PROV_REGION+factor(year)+hospital_beds+scale(hosp_prop_medicaid_charity)+TEACHING, data = i)[, -1]
+covs2a <- model.matrix(~ first_inhaled_therapy+PROV_REGION+factor(year)+hospital_beds+scale(hosp_prop_medicaid_charity)+TEACHING+female_sex+scale(age)+RACE+insurance+elix+cardiovascular_dombrovskiy+neurologic_dombrovskiy+hematologic_dombrovskiy+hepatic_dombrovskiy+renal_dombrovskiy+nmb, data = i)[,-1]
+
+# clustered
+# unadjusted
+sch<-crr(ftime = i$extubation_time, fstatus = i$extubation_status, cov1 = covs1, failcode = 1)
+cor.test(x=sch$res, y=sch$uftime, method="spearman")
+sch<-crr(ftime = i$extubation_time, fstatus = i$extubation_status, cov1 = covs1, failcode = 2)
+cor.test(x=sch$res, y=sch$uftime, method="spearman")
+
+sch<-crr(ftime = i$extubation_time, fstatus = i$extubation_status, cov1 = covs2a,  failcode = 1)
+cor.test(x=sch$res[,1], y=sch$uftime, method="spearman")
+sch<-crr(ftime = i$extubation_time, fstatus = i$extubation_status, cov1 = covs2a, failcode = 2)
+cor.test(x=sch$res[,1], y=sch$uftime, method="spearman")
+
+
+shr_fit1p <- crrc(ftime = i$extubation_time, fstatus = i$extubation_status, cov1 = covs1, failcode = 1, cluster=i$PROV_ID)
+shr_fit2p <- crrc(ftime = i$extubation_time, fstatus = i$extubation_status, cov1 = covs1, failcode = 2, cluster=i$PROV_ID)
+
+shr_fit5p <- crrc(ftime = i$extubation_time, fstatus = i$extubation_status, cov1 = covs2a,failcode = 1, cluster=i$PROV_ID)
+shr_fit6p <- crrc(ftime = i$extubation_time, fstatus = i$extubation_status, cov1 = covs2a,failcode = 2, cluster=i$PROV_ID)
+```
+
+#### secondary outcomes
+```{r secondary}
+#rrt
+prrt<-p %>%
+  filter(rrt_time>=0)
+
+covs1a <- model.matrix(~ first_inhaled_therapy+PROV_REGION+factor(year)+hospital_beds+scale(hosp_prop_medicaid_charity)+TEACHING+female_sex+scale(age)+RACE+insurance+elix+cardiovascular_dombrovskiy+neurologic_dombrovskiy+hematologic_dombrovskiy+hepatic_dombrovskiy+renal_dombrovskiy+nmb, data = prrt)[, -1]
+
+sch<- crr(ftime = prrt$rrt_time, fstatus = prrt$rrt_status, cov1 = covs1a, failcode = 1)
+cor.test(x=sch$res[,1], y=sch$uftime, method="spearman")
+sch<- crr(ftime = prrt$rrt_time, fstatus = prrt$rrt_status, cov1 = covs1a, failcode = 2)
+cor.test(x=sch$res[,1], y=sch$uftime, method="spearman")
+
+shr_fit7prrt <-crrc(ftime = prrt$rrt_time, fstatus = prrt$rrt_status, cov1 = covs1a, failcode = 1, cluster=prrt$PROV_ID)
+shr_fit8prrt <-crrc(ftime = prrt$rrt_time, fstatus = prrt$rrt_status, cov1 = covs1a, failcode = 2, cluster=prrt$PROV_ID)
+
+# death
+fit_death<-glmer(death_hospice~first_inhaled_therapy+PROV_REGION+factor(year)+hospital_beds+scale(hosp_prop_medicaid_charity)+TEACHING+female_sex+scale(age)+RACE+insurance+elix+cardiovascular_dombrovskiy+neurologic_dombrovskiy+hematologic_dombrovskiy+hepatic_dombrovskiy+renal_dombrovskiy+nmb+(1|PROV_ID), p, family="binomial", control=glmerControl(optimizer="bobyqa",
+                            optCtrl=list(maxfun=2e7)))
+
+# ecmo
+p2<-p %>%
+  filter((!is.na(ecmo_day) & ecmo_day>time0)|is.na(ecmo_day))
+
+fit_ecmo<-glmer(ecmo_outcome~first_inhaled_therapy+PROV_REGION+factor(year)+hospital_beds+scale(hosp_prop_medicaid_charity)+TEACHING+female_sex+scale(age)+RACE+insurance+elix+cardiovascular_dombrovskiy+neurologic_dombrovskiy+hematologic_dombrovskiy+hepatic_dombrovskiy+renal_dombrovskiy+nmb+(1|PROV_ID), p2, family="binomial", control=glmerControl(optimizer="bobyqa",
+                            optCtrl=list(maxfun=2e7)))
+
+
+# inhaled therapy costs
+p$inhaled_cost<-floor(p$inhaled_cost)
+fit_inhaled_cost<-lqmm(inhaled_cost~first_inhaled_therapy+PROV_REGION+factor(year)+hospital_beds+scale(hosp_prop_medicaid_charity)+TEACHING+female_sex+scale(age)+RACE+insurance+elix+cardiovascular_dombrovskiy+neurologic_dombrovskiy+hematologic_dombrovskiy+hepatic_dombrovskiy+renal_dombrovskiy+nmb, random=~1, group=PROV_ID, data=p, control = lqmmControl(method = "df", UP_max_iter = 500))
+
+# total costs
+p$total_costs<-floor(p$total_costs)
+fit_total_cost<-lqmm(total_costs~first_inhaled_therapy+PROV_REGION+factor(year)+hospital_beds+scale(hosp_prop_medicaid_charity)+TEACHING+female_sex+scale(age)+RACE+insurance+elix+cardiovascular_dombrovskiy+neurologic_dombrovskiy+hematologic_dombrovskiy+hepatic_dombrovskiy+renal_dombrovskiy+nmb, random=~1, group=PROV_ID, data=p, control = lqmmControl(method = "df", UP_max_iter = 500))
+
+
+# p/f
+fit_pf<-lqmm(pf_outcome~first_inhaled_therapy+PROV_REGION+factor(year)+hospital_beds+TEACHING+scale(hosp_prop_medicaid_charity), random=~1, group=PROV_ID, data=p3, control = lqmmControl(method = "df", UP_max_iter = 500, UP_tol = 1e-6))
+
+```
+
+
+
+
+# subgroups
+```{r subgroup no 2020}
+# 2020
+c<-p %>%
+  filter(year==2020)
+
+covs1a <- model.matrix(~ first_inhaled_therapy+PROV_REGION+hospital_beds+scale(hosp_prop_medicaid_charity)+TEACHING+female_sex+scale(age)+RACE+insurance+elix+cardiovascular_dombrovskiy+neurologic_dombrovskiy+hematologic_dombrovskiy+hepatic_dombrovskiy+renal_dombrovskiy+nmb, data = c)[, -1]
+
+
+sch<-crr(ftime = c$extubation_time, fstatus = c$extubation_status, cov1 = covs1a, failcode = 1)
+cor.test(x=sch$res[,1], y=sch$uftime, method="spearman")
+sch<-crr(ftime = c$extubation_time, fstatus = c$extubation_status, cov1 = covs1a, failcode = 2)
+cor.test(x=sch$res[,1], y=sch$uftime, method="spearman")
+
+shr_fit3c <- crrc(ftime = c$extubation_time, fstatus = c$extubation_status, cov1 = covs1a,failcode = 1, cluster=c$PROV_ID)
+shr_fit4c <- crrc(ftime = c$extubation_time, fstatus = c$extubation_status, cov1 = covs1a,failcode = 2, cluster=c$PROV_ID)
+
+# not 2020
+cn<-p %>%
+  filter(year!=2020)
+
+covs1a <- model.matrix(~ first_inhaled_therapy+PROV_REGION+factor(year)+hospital_beds+scale(hosp_prop_medicaid_charity)+TEACHING+female_sex+scale(age)+RACE+insurance+elix+cardiovascular_dombrovskiy+neurologic_dombrovskiy+hematologic_dombrovskiy+hepatic_dombrovskiy+renal_dombrovskiy+nmb, data = cn)[, -1]
+
+
+sch<-crr(ftime = cn$extubation_time, fstatus = cn$extubation_status, cov1 = covs1a, failcode = 1)
+cor.test(x=sch$res[,1], y=sch$uftime, method="spearman")
+sch<-crr(ftime = cn$extubation_time, fstatus = cn$extubation_status, cov1 = covs1a, failcode = 2)
+cor.test(x=sch$res[,1], y=sch$uftime, method="spearman")
+
+shr_fit3cn <- crrc(ftime = cn$extubation_time, fstatus = cn$extubation_status, cov1 = covs1a,failcode = 1, cluster=cn$PROV_ID)
+shr_fit4cn <- crrc(ftime = cn$extubation_time, fstatus = cn$extubation_status, cov1 = covs1a,failcode = 2, cluster=cn$PROV_ID)
+
+```
+
