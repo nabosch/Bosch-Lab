@@ -1234,6 +1234,11 @@ cor.test(x=sch$res, y=sch$uftime, method="spearman")
 sch<-crr(ftime = p$extubation_time, fstatus = p$extubation_status, cov1 = covs1, failcode = 2)
 cor.test(x=sch$res, y=sch$uftime, method="spearman")
 
+sch<-crr(ftime = p$extubation_time, fstatus = p$extubation_status, cov1 = covs1a,  failcode = 1)
+cor.test(x=sch$res[,1], y=sch$uftime, method="spearman")
+sch<-crr(ftime = p$extubation_time, fstatus = p$extubation_status, cov1 = covs1a, failcode = 2)
+cor.test(x=sch$res[,1], y=sch$uftime, method="spearman")
+
 sch<-crr(ftime = p$extubation_time, fstatus = p$extubation_status, cov1 = covs2a,  failcode = 1)
 cor.test(x=sch$res[,1], y=sch$uftime, method="spearman")
 sch<-crr(ftime = p$extubation_time, fstatus = p$extubation_status, cov1 = covs2a, failcode = 2)
@@ -1271,6 +1276,11 @@ covs2a <- model.matrix(~ first_inhaled_therapy+PROV_REGION+factor(year)+hospital
 sch<-crr(ftime = p4$extubation_time, fstatus = p4$extubation_status, cov1 = covs1, failcode = 1)
 cor.test(x=sch$res, y=sch$uftime, method="spearman")
 sch<-crr(ftime = p4$extubation_time, fstatus = p4$extubation_status, cov1 = covs1, failcode = 2)
+cor.test(x=sch$res, y=sch$uftime, method="spearman")
+
+sch<-crr(ftime = p4$extubation_time, fstatus = p4$extubation_status, cov1 = covs1a, failcode = 1)
+cor.test(x=sch$res, y=sch$uftime, method="spearman")
+sch<-crr(ftime = p4$extubation_time, fstatus = p4$extubation_status, cov1 = covs1a, failcode = 2)
 cor.test(x=sch$res, y=sch$uftime, method="spearman")
 
 sch<-crr(ftime = p4$extubation_time, fstatus = p4$extubation_status, cov1 = covs2a,  failcode = 1)
@@ -1315,6 +1325,11 @@ cor.test(x=sch$res, y=sch$uftime, method="spearman")
 sch<-crr(ftime = f$extubation_time, fstatus = f$extubation_status, cov1 = covs1, failcode = 2)
 cor.test(x=sch$res, y=sch$uftime, method="spearman")
 
+sch<-crr(ftime = f$extubation_time, fstatus = f$extubation_status, cov1 = covs1a, failcode = 1)
+cor.test(x=sch$res, y=sch$uftime, method="spearman")
+sch<-crr(ftime = f$extubation_time, fstatus = f$extubation_status, cov1 = covs1a, failcode = 2)
+cor.test(x=sch$res, y=sch$uftime, method="spearman")
+
 sch<-crr(ftime = f$extubation_time, fstatus = f$extubation_status, cov1 = covs2a,  failcode = 1)
 cor.test(x=sch$res[,1], y=sch$uftime, method="spearman")
 sch<-crr(ftime = f$extubation_time, fstatus = f$extubation_status, cov1 = covs2a, failcode = 2)
@@ -1352,6 +1367,11 @@ covs2a <- model.matrix(~ first_inhaled_therapy+PROV_REGION+factor(year)+hospital
 sch<-crr(ftime = f4$extubation_time, fstatus = f4$extubation_status, cov1 = covs1, failcode = 1)
 cor.test(x=sch$res, y=sch$uftime, method="spearman")
 sch<-crr(ftime = f4$extubation_time, fstatus = f4$extubation_status, cov1 = covs1, failcode = 2)
+cor.test(x=sch$res, y=sch$uftime, method="spearman")
+
+sch<-crr(ftime = f4$extubation_time, fstatus = f4$extubation_status, cov1 = covs1a, failcode = 1)
+cor.test(x=sch$res, y=sch$uftime, method="spearman")
+sch<-crr(ftime = f4$extubation_time, fstatus = f4$extubation_status, cov1 = covs1a, failcode = 2)
 cor.test(x=sch$res, y=sch$uftime, method="spearman")
 
 sch<-crr(ftime = f4$extubation_time, fstatus = f4$extubation_status, cov1 = covs2a,  failcode = 1)
@@ -1395,6 +1415,11 @@ cor.test(x=sch$res, y=sch$uftime, method="spearman")
 sch<-crr(ftime = p2d$extubation_time, fstatus = p2d$extubation_status, cov1 = covs1, failcode = 2)
 cor.test(x=sch$res, y=sch$uftime, method="spearman")
 
+sch<-crr(ftime = p2d$extubation_time, fstatus = p2d$extubation_status, cov1 = covs1a, failcode = 1)
+cor.test(x=sch$res, y=sch$uftime, method="spearman")
+sch<-crr(ftime = p2d$extubation_time, fstatus = p2d$extubation_status, cov1 = covs1a, failcode = 2)
+cor.test(x=sch$res, y=sch$uftime, method="spearman")
+
 sch<-crr(ftime = p2d$extubation_time, fstatus = p2d$extubation_status, cov1 = covs2a,  failcode = 1)
 cor.test(x=sch$res[,1], y=sch$uftime, method="spearman")
 sch<-crr(ftime = p2d$extubation_time, fstatus = p2d$extubation_status, cov1 = covs2a, failcode = 2)
@@ -1436,6 +1461,11 @@ covs2a <- model.matrix(~ first_inhaled_therapy+PROV_REGION+factor(year)+hospital
 sch<-crr(ftime = i$extubation_time, fstatus = i$extubation_status, cov1 = covs1, failcode = 1)
 cor.test(x=sch$res, y=sch$uftime, method="spearman")
 sch<-crr(ftime = i$extubation_time, fstatus = i$extubation_status, cov1 = covs1, failcode = 2)
+cor.test(x=sch$res, y=sch$uftime, method="spearman")
+
+sch<-crr(ftime = i$extubation_time, fstatus = i$extubation_status, cov1 = covs1a, failcode = 1)
+cor.test(x=sch$res, y=sch$uftime, method="spearman")
+sch<-crr(ftime = i$extubation_time, fstatus = i$extubation_status, cov1 = covs1a, failcode = 2)
 cor.test(x=sch$res, y=sch$uftime, method="spearman")
 
 sch<-crr(ftime = i$extubation_time, fstatus = i$extubation_status, cov1 = covs2a,  failcode = 1)
