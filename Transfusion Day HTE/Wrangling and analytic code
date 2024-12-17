@@ -1,1 +1,2779 @@
+---
+title: "hgb ite"
+output:
+  word_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+set.seed(11152024)
+library(tidyverse)
+library(tableone)
+library(data.table)
+library(ggpubr)
+library(rdrobust)
+library(zoo)
+library(rdrobust)
+library(ivreg)
+library(sandwich)
+library(lme4)
+library(grf)
+library(marginaleffects)
+library(ivreg)
+library(tmle)
+library(meta)
+
+interactionp <- function(e1, l1, h1, e2, l2, h2) {
+  d <- (e1-e2)
+  se1<-(h1-l1)/3.92
+  se2<-(h2-l2)/3.92
+  sed<-sqrt((se1^2)+(se2^2))
+  z<-d/sed
+  p<-2*pnorm(abs(z), lower.tail = F)
+  print(z)
+  print(round(p,2))
+}
+
+
+# function to extract rd output (conventional; not bias corrected or robust)
+rd_extraction<-function(x){
+  y<-c(x$coef[1]*100, x$ci[1,]*100, x$pv[1], x$N, x$coef[1], x$se[1])
+  return(y)
+}
+
+rd_extraction_auto<-function(x){
+  y<-c(x$coef[3]*100, x$ci[3,]*100, x$pv[3], x$N, x$coef[3], x$se[3])
+  return(y)
+}
+
+row.names<-c("rd", "lower", "upper", "p", "lower_n", "upper_n", "coef", "se")
+
+```
+
+
+## Cohort creation  
+```{r wrangling1}
+m1<-fread("pinc_ai_2016-2022_summary_2_15_2024.csv", sep=",") %>%
+  filter(genlab==1)
+
+nrow(m1)
+
+m2<-m1 %>%
+  filter(AGE>=18) %>%
+  select(PAT_KEY, MEDREC_KEY)
+
+nrow(m2)
+
+project_raw_data<-list.files(path="/projectnb/walkelab/PINC AI 2016-2022", full.names=T) %>%
+    sort()
+
+gc()
+
+# hgb
+genlab_path<-project_raw_data[project_raw_data %like% "genlab"]
+
+hgb_function <- function(x){
+  y<-fread(x, sep="|", showProgress = FALSE) %>%
+    inner_join(m2) %>%
+    filter(LAB_TEST_LOINC_DESC %in% c("Hemoglobin:MCnc:Pt:Bld:Qn") &
+             RESULT_DAY_NUMBER>=1 & RESULT_DAY_NUMBER<=7) %>%
+    mutate(hgb=as.numeric(NUMERIC_VALUE)) %>%
+    filter(!is.na(hgb)) %>%
+    filter(hgb>=1 & hgb<=25) %>%
+    group_by(PAT_KEY, RESULT_DAY_NUMBER) %>%
+    summarise(hgb=min(hgb)) %>%
+    mutate(hgb=floor(hgb*10)/10) %>%
+    filter(RESULT_DAY_NUMBER>=1) %>%
+    select(PAT_KEY, hgb, hgb_day=RESULT_DAY_NUMBER) %>%
+    group_by(PAT_KEY) %>%
+    arrange(hgb_day, .by_group=T) %>%
+    mutate(next_day_hgb=lead(hgb),
+           next_hgb_day=lead(hgb_day))
+  gc()
+  return(y)
+}
+
+hgb<-lapply(genlab_path, hgb_function)
+gc()
+hgb<-do.call("rbind", hgb)
+gc()
+
+# transfusion (prbcs only, remove whole blood unless or statemtn with prbcs)
+bill_path<-project_raw_data[project_raw_data %like% "patbill"]
+
+bill_lu<-fread("/projectnb/walkelab/PINC AI 2016-2022/bu_chgmstr.txt.gz", sep="|")
+
+tx_lu <-bill_lu %>%
+  filter(STD_CHG_DESC %in% c("RED CELLS (RBC) PACKED 1 UNIT", "RED CELLS (RBC) PACKED 2 UNITS", "RED CELLS (RBC) PACKED 3 UNITS", "RED CELLS (RBC) PACKED 4 UNITS", "RED CELLS (RBC) PACKED 5 UNITS", "RED CELLS (RBC) PACKED 6 UNITS", "RED CELLS (RBC) PACKED 7 UNITS", "RED CELLS (RBC) PACKED 8 UNITS", "RED CELLS (RBC) PACKED 9 UNITS", "RED CELLS (RBC) PACKED 10 UNITS", "RED CELLS (RBC) AUTOLOGOUS 1 UNIT", "RED CELLS (RBC) AUTOLOGOUS 2 UNITS", "RED CELLS (RBC) AUTOLOGOUS 3 UNITS", "RED CELLS (RBC) AUTOLOGOUS 4 UNITS", "RED CELLS (RBC) AUTOLOGOUS 5 UNITS", "RED CELLS (RBC) AUTOLOGOUS 6 UNITS", "RED CELLS (RBC) AUTOLOGOUS 7 UNITS", "RED CELLS (RBC) AUTOLOGOUS 8 UNITS", "RED CELLS (RBC) AUTOLOGOUS 9 UNITS", "RED CELLS (RBC) AUTOLOGOUS 10 UNITS", "RED CELLS  (RBC) LEUKOREDUCED (LR) 1 UNIT", "RED CELLS  (RBC) LEUKOREDUCED (LR) 2 UNITS", "RED CELLS  (RBC) LEUKOREDUCED (LR) 3 UNITS", "RED CELLS  (RBC) LEUKOREDUCED (LR) 4 UNITS", "RED CELLS  (RBC) LEUKOREDUCED (LR) 5 UNITS", "RED CELLS  (RBC) LEUKOREDUCED (LR) 6 UNITS", "RED CELLS  (RBC) LEUKOREDUCED (LR) 7 UNITS", "RED CELLS  (RBC) LEUKOREDUCED (LR) 8 UNITS", "RED CELLS  (RBC) LEUKOREDUCED (LR) 9 UNITS", "RED CELLS  (RBC) LEUKOREDUCED (LR) 10 UNITS", "RED CELLS (RBC) WASHED 1 UNIT", "RED CELLS (RBC) WASHED 2 UNITS", "RED CELLS (RBC) WASHED 3 UNITS", "RED CELLS (RBC) WASHED 4 UNITS"))
+
+tx_lu1<-bill_lu %>%
+  filter(STD_CHG_DESC %in% c("RED CELLS (RBC) WASHED 5 UNITS", "RED CELLS (RBC) WASHED 6 UNITS", "RED CELLS (RBC) WASHED 7 UNITS", "RED CELLS (RBC) WASHED 8 UNITS", "RED CELLS (RBC) WASHED 9 UNITS", "RED CELLS (RBC) WASHED 10 UNITS", "RED CELLS (RBC) DEGLYCEROLIZED 1 UNIT", "RED CELLS (RBC) DEGLYCEROLIZED 2 UNITS", "RED CELLS (RBC) DEGLYCEROLIZED 3 UNITS", "RED CELLS (RBC) DEGLYCEROLIZED 4 UNITS", "RED CELLS (RBC) DEGLYCEROLIZED 5 UNITS", "RED CELLS (RBC) DEGLYCEROLIZED 6 UNITS", "RED CELLS (RBC) DEGLYCEROLIZED 7 UNITS", "RED CELLS (RBC) DEGLYCEROLIZED 8 UNITS", "RED CELLS (RBC) DEGLYCEROLIZED 9 UNITS", "RED CELLS (RBC) DEGLYCEROLIZED 10 UNITS", "RED CELLS(RBC)FROZEN DEGLY WASH LEUKORED(LR) IRRAD", "RED CELLS (RBC) DIRECTED 1 UNIT", "RED CELLS (RBC) DIRECTED 2 UNITS", "RED CELLS (RBC) DIRECTED 3 UNITS", "RED CELLS (RBC) DIRECTED 4 UNITS", "RED CELLS (RBC) DIRECTED 5 UNITS", "RED CELLS (RBC) DIRECTED 6 UNITS", "RED CELLS (RBC) DIRECTED 7 UNITS", "RED CELLS (RBC) DIRECTED 8 UNITS", "RED CELLS (RBC) DIRECTED 9 UNITS", "RED CELLS (RBC) DIRECTED 10 UNITS", "WHOLE BLOOD OR RED CELLS (RBC) LEUKORED(LR)CMV NEG", "WHOLE BLOOD OR RED CELLS(RBC) LR FROZ DEGLY WASHED",  "PACKED RED CELLS (RBC)", "RED CELLS (RBC) LEUKOREDUCED (LR)", "RED CELLS (RBC) LEUKOREDUCED (LR) IRRADIATED", "RED CELLS (RBC) LEUKOREDUCED (LR) CMV NEG", "RED CELLS (RBC) LEUKOREDUCED (LR) IRRAD CMV NEG", "RED CELLS (RBC) IRRADIATED", "RED CELLS (RBC) CMV NEG", "RED CELLS (RBC) DEGLYCEROLIZED PROCESSING", "RED CELLS (RBC) LEUKOREDUCED (LR) PROCESSING", "RED CELLS (RBC) PACKED PROCESSING", "RED CELLS (RBC) WASHED PROCESSING", "RED CELLS (RBC) DIRECTED PROCESSING", "RED CELLS (RBC)  AUTOLOGOUS PROCESSING", "RED CELLS (RBC) LEUKOREDUCED (LR) IRRAD PROCESSING", "RED CELLS(RBC) LEUKOREDUCED(LR) CMV NEG PROCESSING", "RED CELLS(RBC) LEUKO(LR) IRRAD CMV NEG PROCESSING", "RED CELLS (RBC) IRRADIATED PROCESSING", "RED CELLS (RBC) CMV NEG PROCESSING",  "WHOLE BLOOD OR RED CELLS(RBC)LR CMV NEG PROCESSING", "WHOLE BLOOD OR RED CELLS(RBC)LR FRZ DGLY WASH PROC",  "RED CELLS (RBC)FROZEN DEGLY WASH LR IRR PROCESSING"))
+
+tx_lu<-tx_lu %>%
+  full_join(tx_lu1)
+
+bill_function <- function(x){
+  y<-fread(x, sep="|", showProgress = FALSE) %>%
+    inner_join(m2) %>%
+    inner_join(tx_lu) %>%
+    mutate(tx=1) %>%
+    group_by(PAT_KEY, SERV_DAY) %>%
+    summarise(tx=max(tx)) %>%
+    select(PAT_KEY, tx_day=SERV_DAY, tx)
+  gc()
+  return(y)
+}
+
+bill<-lapply(bill_path, bill_function)
+gc()
+tx<-do.call("rbind", bill)
+gc()
+
+tx_hgb_day<-hgb %>%
+  left_join(tx %>%
+              rename(hgb_day=tx_day)) %>%
+  mutate(tx=if_else(tx==1 & !is.na(tx),1,0))
+
+# icu on day
+icu_lu<-bill_lu %>%
+  filter(CLIN_SUM_DESC=="R&B ICU") %>%
+  mutate(icu_on_day=1)
+
+icu_function <- function(x){
+  y<-fread(x, sep="|", showProgress = FALSE) %>%
+    inner_join(m2) %>%
+    inner_join(icu_lu) %>%
+    group_by(PAT_KEY, SERV_DAY) %>%
+    summarise(icu_on_day=max(icu_on_day)) %>%
+    select(PAT_KEY, hgb_day=SERV_DAY, icu_on_day)
+  gc()
+  return(y)
+}
+
+icu<-lapply(bill_path, icu_function)
+gc()
+icu<-do.call("rbind", icu)
+gc()
+
+gc()
+
+tx_before<-hgb %>%
+  left_join(tx) %>%
+  filter(!is.na(tx_day) & tx_day<hgb_day & tx_day>=1) %>%
+  group_by(PAT_KEY, hgb_day) %>%
+  mutate(tx_before=1) %>%
+  summarize(tx_before=max(tx_before))
+
+gc()
+
+m3<-tx_hgb_day %>%
+  left_join(m1) %>%
+  left_join(tx_before) %>%
+  left_join(icu) %>%
+  mutate(tx_before=if_else(tx_before==1 & !is.na(tx_before),1,0),
+         icu_on_day=if_else(icu_on_day==1 & !is.na(icu_on_day),1,0))
+
+nrow(m3)
+nrow(m3 %>% group_by(PAT_KEY) %>% slice(1L))
+
+
+gc()
+
+# hospitals that use transfusion bills
+hospitals_that_use_transfusion_billing<-m3 %>%
+  group_by(PROV_ID) %>%
+  summarize(hospital_number_of_tx=sum(tx))
+
+hospitals_that_use_transfusion_billing1<-hospitals_that_use_transfusion_billing %>%
+  filter(hospital_number_of_tx>=1)
+
+m4<-m3 %>%
+  inner_join(hospitals_that_use_transfusion_billing1)
+
+nrow(m4)
+nrow(m4 %>% group_by(PAT_KEY) %>% slice(1L))
+nrow(m4 %>% group_by(PROV_ID) %>% slice(1L))
+
+
+gc()
+
+# major surgery on  or before day of hemoglobin measurement
+major_surgery_lu<-fread("/projectnb/walkelab/Bosch/R scripts/hcup_major_surgery_diag_and_thera.csv", sep=",") %>%
+  mutate(major_surgery=1) %>%
+  mutate(ICD_CODE=str_remove(ICD_CODE, "'")) %>%
+  mutate(ICD_CODE=str_remove(ICD_CODE, "'"))
+
+icd_proc_path<-project_raw_data[project_raw_data %like% "paticd_proc"]
+
+major_surgery_function <- function(x){
+  y<-fread(x, sep="|", showProgress = FALSE) %>%
+    inner_join(m4 %>%
+                 select(PAT_KEY, hgb_day)) %>%
+    inner_join(major_surgery_lu) %>%
+    filter(PROC_DAY<=hgb_day) %>%
+    mutate(major_surgery=1) %>%
+    group_by(PAT_KEY, hgb_day) %>%
+    summarize(major_surgery_on_or_before_hgb_day=max(major_surgery)) %>%
+    select(PAT_KEY, hgb_day, major_surgery_on_or_before_hgb_day)
+  gc()
+  return(y)
+}
+
+major_surgery<-lapply(icd_proc_path, major_surgery_function)
+gc()
+major_surgery<-do.call("rbind", major_surgery)
+gc()
+
+
+#  anemia of acute blood loss
+project_raw_data<-list.files(path="/projectnb/walkelab/PINC AI 2016-2022", full.names=T) %>%
+    sort()
+
+icd_diag_path<-project_raw_data[project_raw_data %like% "paticd_diag"]
+
+posthemorrhagic_anemia_function <- function(x){
+  y<-fread(x, sep="|", showProgress = FALSE) %>%
+    inner_join(m2) %>%
+    filter(ICD_POA=="Y") %>%
+   filter(ICD_CODE %in% c("D62")) %>%
+    mutate(posthemorrhagic_anemia=1) %>%
+    group_by(PAT_KEY) %>%
+    summarize(posthemorrhagic_anemia=max(posthemorrhagic_anemia))
+  gc()
+  return(y)
+}
+
+posthemorrhagic_anemia<-lapply(icd_diag_path, posthemorrhagic_anemia_function)
+gc()
+posthemorrhagic_anemia<-do.call("rbind", posthemorrhagic_anemia)
+gc()
+
+# primary diagnosis
+icd_diag_path<-project_raw_data[project_raw_data %like% "paticd_diag"]
+
+primary_diagnosis_function <- function(x){
+  y<-fread(x, sep="|", showProgress = FALSE) %>%
+    inner_join(m2) %>%
+    filter(ICD_PRI_SEC=="P") %>%
+    group_by(PAT_KEY) %>%
+    summarize(primary_diagnosis=first(ICD_CODE))
+  gc()
+  return(y)
+}
+
+primary_diagnosis<-lapply(icd_diag_path, primary_diagnosis_function)
+gc()
+primary_diagnosis<-do.call("rbind", primary_diagnosis)
+gc()
+
+# specific groups from uptodate (intra-operative, cardiac surgery and ortho surgery all linked together into major surgery on or before; acute myocardial infarction, cardiac surgery, icu, septic shock, active bleeding, orthopedic surgery, neurologic catastrophe [recent clinical trial])
+# acute myocardial infaraction
+ami_function <- function(x){
+  y<-fread(x, sep="|", showProgress = FALSE) %>%
+    inner_join(m2) %>%
+    filter(ICD_POA=="Y") %>%
+   filter(ICD_CODE %in% c("I20.0", "I21.01", "I21.02", "I21.09", "I21.11", "I21.19", "I21.21", "I21.29", "I21.3", "I21.4", "I21.9", "I21.A1", "I21.A9", "I22.0", "I22.1", "I22.2", "I22.8", "I22.9")) %>%
+    mutate(ami=1) %>%
+    group_by(PAT_KEY) %>%
+    summarize(ami=max(ami))
+  gc()
+  return(y)
+}
+
+ami<-lapply(icd_diag_path, ami_function)
+gc()
+ami<-do.call("rbind", ami)
+gc()
+
+# brain injury (tbi, sub arachnoid, intracerebral)
+brain_injury_function <- function(x){
+  y<-fread(x, sep="|", showProgress = FALSE) %>%
+    inner_join(m2) %>%
+    filter(ICD_POA=="Y") %>%
+   filter(substr(ICD_CODE,1,4) %in% c("I60.", "I61.", "S06.")) %>%
+    mutate(brain_injury=1) %>%
+    group_by(PAT_KEY) %>%
+    summarize(brain_injury=max(brain_injury))
+  gc()
+  return(y)
+}
+
+brain_injury<-lapply(icd_diag_path, brain_injury_function)
+gc()
+brain_injury<-do.call("rbind", brain_injury)
+gc()
+
+# combining
+m5<-m4 %>%
+  left_join(major_surgery) %>%
+  left_join(primary_diagnosis) %>%
+  left_join(posthemorrhagic_anemia) %>%
+  left_join(ami) %>%
+  left_join(brain_injury) %>%
+  mutate(major_surgery_on_or_before_hgb_day=if_else(!is.na(major_surgery_on_or_before_hgb_day) & major_surgery_on_or_before_hgb_day==1,1,0),
+         posthemorrhagic_anemia=if_else(!is.na(posthemorrhagic_anemia) & posthemorrhagic_anemia==1,1,0),
+         ami=if_else(!is.na(ami) & ami==1,1,0),
+         brain_injury=if_else(!is.na(brain_injury) & brain_injury==1,1,0))
+gc()
+
+nrow(m5)
+nrow(m5 %>% group_by(PAT_KEY) %>% slice(1L))
+nrow(m5 %>% group_by(MEDREC_KEY) %>% slice(1L))
+
+# adding other cbc markers
+genlab_path<-project_raw_data[project_raw_data %like% "genlab"]
+
+cbc_function <- function(x){
+  y<-fread(x, sep="|", showProgress = FALSE) %>%
+    inner_join(m2) %>%
+    filter(LAB_TEST_LOINC_DESC %in% c("Leukocytes:NCnc:Pt:Bld:Qn", "Leukocytes:NCnc:Pt:Bld:Qn:Automated count",
+                                      "Hematocrit:VFr:Pt:Bld:Qn", "Hematocrit:VFr:Pt:Bld:Qn:Automated count",
+                                      "Platelets:NCnc:Pt:Bld:Qn", "Platelets:NCnc:Pt:Bld:Qn:Automated count",
+                                      "Erythrocyte mean corpuscular hemoglobin concentration:MCnc:Pt:RBC:Qn", "Erythrocyte mean corpuscular hemoglobin:EntMass:Pt:RBC:Qn", "Erythrocyte mean corpuscular hemoglobin:EntMass:Pt:RBC:Qn:Automated count", "Erythrocyte mean corpuscular hemoglobin concentration:MCnc:Pt:RBC:Qn:Automated count",
+                                      "Erythrocyte mean corpuscular volume:EntVol:Pt:RBC:Qn", "Erythrocyte mean corpuscular volume:EntVol:Pt:RBC:Qn:Automated count", 
+                                      "Erythrocyte distribution width:Ratio:Pt:RBC:Qn", "Erythrocyte distribution width:Ratio:Pt:RBC:Qn:Automated count", "Erythrocyte distribution width:EntVol:Pt:RBC:Qn:Automated count") &
+    RESULT_DAY_NUMBER>=1 & RESULT_DAY_NUMBER<=7) %>%
+    mutate(NUMERIC_VALUE=as.numeric(NUMERIC_VALUE),
+           cbc=case_when(LAB_TEST_LOINC_DESC %in% c("Leukocytes:NCnc:Pt:Bld:Qn", "Leukocytes:NCnc:Pt:Bld:Qn:Automated count")~"wbc",
+                              LAB_TEST_LOINC_DESC %in% c("Hematocrit:VFr:Pt:Bld:Qn", "Hematocrit:VFr:Pt:Bld:Qn:Automated count")~"crit",
+                              LAB_TEST_LOINC_DESC %in% c("Platelets:NCnc:Pt:Bld:Qn", "Platelets:NCnc:Pt:Bld:Qn:Automated count")~"plt",
+                              LAB_TEST_LOINC_DESC %in% c("Erythrocyte mean corpuscular hemoglobin concentration:MCnc:Pt:RBC:Qn", "Erythrocyte mean corpuscular hemoglobin:EntMass:Pt:RBC:Qn", "Erythrocyte mean corpuscular hemoglobin:EntMass:Pt:RBC:Qn:Automated count", "Erythrocyte mean corpuscular hemoglobin concentration:MCnc:Pt:RBC:Qn:Automated count")~"mchc",
+                              LAB_TEST_LOINC_DESC %in% c("Erythrocyte mean corpuscular volume:EntVol:Pt:RBC:Qn", "Erythrocyte mean corpuscular volume:EntVol:Pt:RBC:Qn:Automated count")~"mcv",
+                              TRUE~"rdw")) %>%
+    filter(!is.na(NUMERIC_VALUE)) %>%
+    group_by(PAT_KEY, RESULT_DAY_NUMBER, cbc) %>%
+    summarize(value=first(NUMERIC_VALUE)) %>%
+    pivot_wider(id_cols=c("PAT_KEY", "RESULT_DAY_NUMBER"),
+                names_from=cbc,
+                values_from=value) %>%
+    rename(hgb_day=RESULT_DAY_NUMBER)
+  gc()
+  return(y)
+  gc()
+}
+
+cbc<-lapply(genlab_path, cbc_function)
+gc()
+cbc<-do.call("rbind", cbc)
+gc()
+
+m6<-m5 %>%
+  left_join(cbc)
+
+nrow(m6)
+nrow(m6 %>% group_by(PAT_KEY) %>% slice(1L))
+nrow(m6 %>% group_by(MEDREC_KEY) %>% slice(1L))
+
+fwrite(m6, "hgb_ite-12-12-2024.csv")
+gc()
+m6<-fread("hgb_ite-12-12-2024.csv")
+gc()
+
+
+
+gc()
+
+```
+
+
+# reducing to first 7 days and remaining variables
+```{r visualizing}
+# main diagnoses count
+primary_diagnosis_count<-m6 %>%
+  group_by(primary_diagnosis, hgb_day) %>%
+  mutate(primary_diagnosis_count=1) %>%
+  summarize(primary_diagnosis_count=sum(primary_diagnosis_count)) %>%
+  group_by(hgb_day) %>%
+  arrange(desc(primary_diagnosis_count)) %>%
+  top_n(3, primary_diagnosis_count)
+
+gc()
+
+# sofa add in
+sofa<-fread("sofa-4-19-2024.csv", sep=",")
+
+gc()
+
+sofa1<-sofa %>%
+  mutate(hgb_day=day) %>%
+  filter(!is.na(hgb_day)) %>%
+  select(PAT_KEY, hgb_day, msofa_totali)
+
+gc()
+
+summary(sofa1)
+
+# removing hgb of exactly 7.0 and addint other synthetic variables like top diagnoses (still need to do) and ACS
+t<-m6 %>%
+  left_join(sofa1) %>%
+  filter(hgb!=7.0) %>%
+  mutate(fsex=if_else(GENDER=="F",1,0),
+         death_hospice=if_else(DISC_STATUS %in% c(20,50,51),1,0),
+         death=if_else(DISC_STATUS %in% c(20),1,0),
+         hospice=if_else(DISC_STATUS %in% c(50,51),1,0),
+         gagne3=if_else(gagne_combined_poa>3,1,0),
+         age65=if_else(AGE>=65,1,0),
+         sepsis_unspecified_organism=if_else(primary_diagnosis=="A41.9",1,0),
+         covid=if_else(primary_diagnosis=="U07.1",1,0),
+         htn_heart_kidney_chf=if_else(primary_diagnosis=="I13.0",1,0),
+         acute_kidney_failure=if_else(primary_diagnosis=="N17.9",1,0),
+         nstemi=if_else(primary_diagnosis=="I21.4",1,0))
+
+t$msofa_totali[is.na(t$msofa_totali)]<-0
+
+gc()
+
+
+nrow(t)
+nrow(t %>% group_by(PAT_KEY) %>% slice(1L))
+nrow(t %>% group_by(MEDREC_KEY) %>% slice(1L))
+
+gc()
+
+
+```
+
+
+# table 1
+```{r table 1}
+# need to add top diagnoses and check normality of cbc indices
+myVars<-c("AGE", "GENDER", "icu_on_day", "gagne_combined_poa", "angus_sepsis_poa", "ami", "sepsis_unspecified_organism", "covid", "htn_heart_kidney_chf", "nstemi", "major_surgery_on_or_before_hgb_day", "posthemorrhagic_anemia", "hgb", "crit","mchc", "mcv", "rdw", "plt", "wbc",  "tx_before", "msofa_totali")
+
+catVars<-c("GENDER", "icu_on_day", "angus_sepsis_poa", "ami", "tx_before", "sepsis_unspecified_organism", "covid", "htn_heart_kidney_chf", "nstemi", "major_surgery_on_or_before_hgb_day", "posthemorrhagic_anemia")
+
+nonnormVars<-c("AGE", "gagne_combined_poa", "hgb", "crit", "mchc", "mcv", "rdw", "plt", "wbc", "msofa_totali")
+
+tabd <- CreateTableOne(vars = myVars, data = t, factorVars = catVars, test=F, strata="hgb_day", addOverall=TRUE)
+print(tabd, missing=T, nonnormal = nonnormVars, smd=T)
+
+
+gc()
+
+# narrower range
+t1<-t %>%
+  filter(hgb>=6 & hgb<=8)
+
+critm<-median(t1$crit, na.rm=T)
+t1$critm<-0
+t1$critm[t1$crit>=critm]<-1
+
+mchcm<-median(t1$mchc, na.rm=T)
+t1$mchcm<-0
+t1$mchcm[t1$mchc>=mchcm]<-1
+
+mcvm<-median(t1$mcv, na.rm=T)
+t1$mcvm<-0
+t1$mcvm[t1$mcv>=mcvm]<-1
+
+rdwm<-median(t1$rdw, na.rm=T)
+t1$rdwm<-0
+t1$rdwm[t1$rdw>=rdwm]<-1
+
+gc()
+
+wbcm<-median(t1$wbc, na.rm=T)
+t1$wbcm<-0
+t1$wbcm[t1$wbc>=wbcm]<-1
+
+gc()
+
+pltm<-median(t1$plt, na.rm=T)
+t1$pltm<-0
+t1$pltm[t1$plt>=pltm]<-1
+
+gc()
+
+msofa_totalim<-median(t1$msofa_totali, na.rm=T)
+t1$msofa_totalim<-0
+t1$msofa_totalim[t1$msofa_totali>=msofa_totalim]<-1
+
+gc()
+
+
+nrow(t1)
+nrow(t1 %>% group_by(PAT_KEY) %>% slice(1L))
+nrow(t1 %>% group_by(MEDREC_KEY) %>% slice(1L))
+
+
+tabd1 <- CreateTableOne(vars = myVars, data = t1, factorVars = catVars, test=F, strata="hgb_day", addOverall=F)
+print_tabd1<-print(tabd1, missing=T, nonnormal = nonnormVars, smd=T)
+write.csv(print_tabd1, file = "myTable.csv")
+
+# main diagnoses count
+primary_diagnosis_countt<-t1 %>%
+  group_by(primary_diagnosis, hgb_day) %>%
+  mutate(primary_diagnosis_count=1) %>%
+  summarize(primary_diagnosis_count=sum(primary_diagnosis_count)) %>%
+  group_by(hgb_day) %>%
+  arrange(desc(primary_diagnosis_count)) %>%
+  top_n(3, primary_diagnosis_count)
+
+
+d1t<-t1 %>% filter(hgb_day==1)
+gc()
+d2t<-t1 %>% filter(hgb_day==2)
+gc()
+d3t<-t1 %>% filter(hgb_day==3)
+gc()
+d4t<-t1 %>% filter(hgb_day==4)
+gc()
+d5t<-t1 %>% filter(hgb_day==5)
+gc()
+d6t<-t1 %>% filter(hgb_day==6)
+gc()
+d7t<-t1 %>% filter(hgb_day==7)
+gc()
+
+```
+
+
+# density plot across days
+````{r histogram across days}
+th<-m6 %>%
+  mutate(`Hospital Day`=factor(hgb_day))
+
+panela<- ggplot(th, aes(x=hgb, color=`Hospital Day`, fill=`Hospital Day`))+
+  geom_density(alpha=0.2)+
+  theme_bw()+
+  xlab("Hemoglobin concentration (g/dL)")+
+  theme(legend.position = c(0.8,0.6))
+
+panelb<-ggplot(th, aes(x=hgb, color=`Hospital Day`, fill=`Hospital Day`))+
+  geom_density(alpha=0.2)+
+  theme_bw()+
+  xlab("Hemoglobin concentration (g/dL)")+
+  theme(legend.position = c(0.2,0.6))+
+  coord_cartesian(xlim=c(6,8))
+
+p<-gridExtra::arrangeGrob(panela, panelb)
+ggsave("hgbdensitycurves_11-22-2024.jpeg", width=10, height=8, p)
+
+
+```
+
+
+# overall patterns of use and outcomes
+```{r use and outcomes}
+# use of transfusions overall and by day
+table(t$tx)
+prop.table(table(t$tx))
+table(t$death)
+prop.table(table(t$death))
+table(t$death_hospice)
+prop.table(table(t$death_hospice))
+
+by_day<-t %>%
+  group_by(hgb_day) %>%
+  mutate(count=1) %>%
+  summarize(txn=sum(tx),
+            txp=sum(tx)/sum(count),
+            death_hospicen=sum(death_hospice),
+            death_hospicep=sum(death_hospice)/sum(count),
+            deathn=sum(death),
+            deathp=sum(death)/sum(count))
+
+View(by_day)
+
+
+# among narrower range
+table(t1$tx)
+prop.table(table(t1$tx))
+table(t1$death)
+prop.table(table(t1$death))
+table(t1$death_hospice)
+prop.table(table(t1$death_hospice))
+
+by_day2<-t1 %>%
+  group_by(hgb_day) %>%
+  mutate(count=1) %>%
+  summarize(txn=sum(tx),
+            txp=sum(tx)/sum(count),
+            death_hospicen=sum(death_hospice),
+            death_hospicep=sum(death_hospice)/sum(count),
+            deathn=sum(death),
+            deathp=sum(death)/sum(count))
+
+View(by_day2)
+
+```
+
+
+# by day cohorts (and decreased to hgb range 4-10)
+```{r by day cohorts}
+d1<-t %>% filter(hgb_day==1)
+gc()
+d2<-t %>% filter(hgb_day==2)
+gc()
+d3<-t %>% filter(hgb_day==3)
+gc()
+d4<-t %>% filter(hgb_day==4)
+gc()
+d5<-t %>% filter(hgb_day==5)
+gc()
+d6<-t %>% filter(hgb_day==6)
+gc()
+d7<-t %>% filter(hgb_day==7)
+gc()
+
+```
+
+# by day analyses
+```{r by day analyses}
+# exposure
+tx1<-rdrobust(x=d1$hgb, y=d1$tx, c=7, p=1, h=1, cluster=d1$PROV_ID)
+gc()
+tx2<-rdrobust(x=d2$hgb, y=d2$tx, c=7, p=1, h=1, cluster=d2$PROV_ID)
+gc()
+tx3<-rdrobust(x=d3$hgb, y=d3$tx, c=7, p=1, h=1, cluster=d3$PROV_ID)
+gc()
+tx4<-rdrobust(x=d4$hgb, y=d4$tx, c=7, p=1, h=1, cluster=d4$PROV_ID)
+gc()
+tx5<-rdrobust(x=d5$hgb, y=d5$tx, c=7, p=1, h=1, cluster=d5$PROV_ID)
+gc()
+tx6<-rdrobust(x=d6$hgb, y=d6$tx, c=7, p=1, h=1, cluster=d6$PROV_ID)
+gc()
+tx7<-rdrobust(x=d7$hgb, y=d7$tx, c=7, p=1, h=1, cluster=d7$PROV_ID)
+gc()
+
+rdd_tx<-rbind(
+              rd_extraction(tx1),
+              rd_extraction(tx2),
+              rd_extraction(tx3),
+              rd_extraction(tx4),
+              rd_extraction(tx5),
+              rd_extraction(tx6),
+              rd_extraction(tx7)) %>%
+    data.frame() %>%
+  setNames(row.names)
+
+View(rdd_tx)
+
+# itt
+mod1<-rdrobust(x=d1$hgb, y=d1$death_hospice, c=7, p=1, h=1, cluster=d1$PROV_ID)
+gc()
+mod2<-rdrobust(x=d2$hgb, y=d2$death_hospice, c=7, p=1, h=1, cluster=d2$PROV_ID)
+gc()
+mod3<-rdrobust(x=d3$hgb, y=d3$death_hospice, c=7, p=1, h=1, cluster=d3$PROV_ID)
+gc()
+mod4<-rdrobust(x=d4$hgb, y=d4$death_hospice, c=7, p=1, h=1, cluster=d4$PROV_ID)
+gc()
+mod5<-rdrobust(x=d5$hgb, y=d5$death_hospice, c=7, p=1, h=1, cluster=d5$PROV_ID)
+gc()
+mod6<-rdrobust(x=d6$hgb, y=d6$death_hospice, c=7, p=1, h=1, cluster=d6$PROV_ID)
+gc()
+mod7<-rdrobust(x=d7$hgb, y=d7$death_hospice, c=7, p=1, h=1, cluster=d7$PROV_ID)
+gc()
+
+rdd_outcome<-rbind(
+              rd_extraction(mod1),
+              rd_extraction(mod2),
+              rd_extraction(mod3),
+              rd_extraction(mod4),
+              rd_extraction(mod5),
+              rd_extraction(mod6),
+              rd_extraction(mod7)) %>%
+    data.frame() %>%
+  setNames(row.names)
+
+View(rdd_outcome)
+
+
+
+# fuzzy
+fuzz1<-rdrobust(x=d1$hgb, y=d1$death_hospice, c=7, fuzzy=d1$tx, p=1, h=1, cluster=d1$PROV_ID)
+gc()
+fuzz2<-rdrobust(x=d2$hgb, y=d2$death_hospice, c=7, fuzzy=d2$tx, p=1, h=1, cluster=d2$PROV_ID)
+gc()
+fuzz3<-rdrobust(x=d3$hgb, y=d3$death_hospice, c=7, fuzzy=d3$tx, p=1, h=1, cluster=d3$PROV_ID)
+gc()
+fuzz4<-rdrobust(x=d4$hgb, y=d4$death_hospice, c=7, fuzzy=d4$tx, p=1, h=1, cluster=d4$PROV_ID)
+gc()
+fuzz5<-rdrobust(x=d5$hgb, y=d5$death_hospice, c=7, fuzzy=d5$tx, p=1, h=1, cluster=d5$PROV_ID)
+gc()
+fuzz6<-rdrobust(x=d6$hgb, y=d6$death_hospice, c=7, fuzzy=d6$tx, p=1, h=1, cluster=d6$PROV_ID)
+gc()
+fuzz7<-rdrobust(x=d7$hgb, y=d7$death_hospice, c=7, fuzzy=d7$tx, p=1, h=1, cluster=d7$PROV_ID)
+gc()
+
+rdd_outcome_fuzzy<-rbind(
+              rd_extraction(fuzz1),
+              rd_extraction(fuzz2),
+              rd_extraction(fuzz3),
+              rd_extraction(fuzz4),
+              rd_extraction(fuzz5),
+              rd_extraction(fuzz6),
+              rd_extraction(fuzz7)) %>%
+    data.frame() %>%
+  setNames(row.names)
+
+View(rdd_outcome_fuzzy)
+
+
+```
+
+
+
+```{r meta}
+# meta-analysis and regression
+cohort=c("Day 1 cohort","Day 2 cohort","Day 3 cohort","Day 4 cohort","Day 5 cohort","Day 6 cohort","Day 7 cohort")
+day=c(1,2,3,4,5,6,7)
+
+
+ma_primary<-metagen(TE=rdd_outcome_fuzzy$coef, seTE=rdd_outcome_fuzzy$se, sm="RD", comb.random=T, studlab=cohort)
+ma_primary
+
+pdf('hgbhte_ma_12-3-2024.pdf')
+
+forest(ma_primary, layout = "JAMA",
+       comb.fixed=F,
+       )
+
+dev.off()
+
+mr_primary<-metareg(ma_primary, ~day)
+mr_primary
+
+pdf('hgbhte_mr_12-3-2024.pdf')
+bubble(mr_primary, studlab=F, pos.studlab=2, offset=-0.2, ylim=c(-0.05, 0.05), xlab="Hospital day", ylab="Risk difference (Transfusion minus no transfusion)")
+dev.off()
+
+```
+
+
+# sensitivity
+```{r sensitivitiy}
+# polynomial regression (p=2)
+fuzz1p2<-rdrobust(x=d1$hgb, y=d1$death_hospice, c=7, fuzzy=d1$tx, p=2, h=2)
+gc()
+fuzz2p2<-rdrobust(x=d2$hgb, y=d2$death_hospice, c=7, fuzzy=d2$tx, p=2, h=2)
+gc()
+fuzz3p2<-rdrobust(x=d3$hgb, y=d3$death_hospice, c=7, fuzzy=d3$tx, p=2, h=2)
+gc()
+fuzz4p2<-rdrobust(x=d4$hgb, y=d4$death_hospice, c=7, fuzzy=d4$tx, p=2, h=2)
+gc()
+fuzz5p2<-rdrobust(x=d5$hgb, y=d5$death_hospice, c=7, fuzzy=d5$tx, p=2, h=2)
+gc()
+fuzz6p2<-rdrobust(x=d6$hgb, y=d6$death_hospice, c=7, fuzzy=d6$tx, p=2, h=2)
+gc()
+fuzz7p2<-rdrobust(x=d7$hgb, y=d7$death_hospice, c=7, fuzzy=d7$tx, p=2, h=2)
+gc()
+
+rdd_outcome_fuzzyp2<-rbind(
+              rd_extraction(fuzz1p2),
+              rd_extraction(fuzz2p2),
+              rd_extraction(fuzz3p2),
+              rd_extraction(fuzz4p2),
+              rd_extraction(fuzz5p2),
+              rd_extraction(fuzz6p2),
+              rd_extraction(fuzz7p2)) %>%
+    data.frame() %>%
+  setNames(row.names)
+
+View(rdd_outcome_fuzzyp2)
+
+
+
+# half bandwidth
+fuzz1h0.5<-rdrobust(x=d1$hgb, y=d1$death_hospice, c=7, fuzzy=d1$tx, p=1, h=0.5)
+gc()
+fuzz2h0.5<-rdrobust(x=d2$hgb, y=d2$death_hospice, c=7, fuzzy=d2$tx, p=1, h=0.5)
+gc()
+fuzz3h0.5<-rdrobust(x=d3$hgb, y=d3$death_hospice, c=7, fuzzy=d3$tx, p=1, h=0.5)
+gc()
+fuzz4h0.5<-rdrobust(x=d4$hgb, y=d4$death_hospice, c=7, fuzzy=d4$tx, p=1, h=0.5)
+gc()
+fuzz5h0.5<-rdrobust(x=d5$hgb, y=d5$death_hospice, c=7, fuzzy=d5$tx, p=1, h=0.5)
+gc()
+fuzz6h0.5<-rdrobust(x=d6$hgb, y=d6$death_hospice, c=7, fuzzy=d6$tx, p=1, h=0.5)
+gc()
+fuzz7h0.5<-rdrobust(x=d7$hgb, y=d7$death_hospice, c=7, fuzzy=d7$tx, p=1, h=0.5)
+gc()
+
+rdd_outcome_fuzzyh0.5<-rbind(
+              rd_extraction(fuzz1h0.5),
+              rd_extraction(fuzz2h0.5),
+              rd_extraction(fuzz3h0.5),
+              rd_extraction(fuzz4h0.5),
+              rd_extraction(fuzz5h0.5),
+              rd_extraction(fuzz6h0.5),
+              rd_extraction(fuzz7h0.5)) %>%
+    data.frame() %>%
+  setNames(row.names)
+
+View(rdd_outcome_fuzzyh0.5)
+
+
+
+# double bandwidth
+fuzz1h2<-rdrobust(x=d1$hgb, y=d1$death_hospice, c=7, fuzzy=d1$tx, p=1, h=2)
+gc()
+fuzz2h2<-rdrobust(x=d2$hgb, y=d2$death_hospice, c=7, fuzzy=d2$tx, p=1, h=2)
+gc()
+fuzz3h2<-rdrobust(x=d3$hgb, y=d3$death_hospice, c=7, fuzzy=d3$tx, p=1, h=2)
+gc()
+fuzz4h2<-rdrobust(x=d4$hgb, y=d4$death_hospice, c=7, fuzzy=d4$tx, p=1, h=2)
+gc()
+fuzz5h2<-rdrobust(x=d5$hgb, y=d5$death_hospice, c=7, fuzzy=d5$tx, p=1, h=2)
+gc()
+fuzz6h2<-rdrobust(x=d6$hgb, y=d6$death_hospice, c=7, fuzzy=d6$tx, p=1, h=2)
+gc()
+fuzz7h2<-rdrobust(x=d7$hgb, y=d7$death_hospice, c=7, fuzzy=d7$tx, p=1, h=2)
+gc()
+
+rdd_outcome_fuzzyh2<-rbind(
+              rd_extraction(fuzz1h2),
+              rd_extraction(fuzz2h2),
+              rd_extraction(fuzz3h2),
+              rd_extraction(fuzz4h2),
+              rd_extraction(fuzz5h2),
+              rd_extraction(fuzz6h2),
+              rd_extraction(fuzz7h2)) %>%
+    data.frame() %>%
+  setNames(row.names)
+
+View(rdd_outcome_fuzzyh2)
+
+
+# automatic bandwidth
+d1a<-d1 %>% filter(hgb>=5 & hgb<=9)
+gc()
+d2a<-d2 %>% filter(hgb>=5 & hgb<=9)
+gc()
+d3a<-d3 %>% filter(hgb>=5 & hgb<=9)
+gc()
+d4a<-d4 %>% filter(hgb>=5 & hgb<=9)
+gc()
+d5a<-d5 %>% filter(hgb>=5 & hgb<=9)
+gc()
+d6a<-d6 %>% filter(hgb>=5 & hgb<=9)
+gc()
+d7a<-d7 %>% filter(hgb>=5 & hgb<=9)
+gc()
+
+fuzz1auto<-rdrobust(x=d1a$hgb, y=d1a$death_hospice, c=7, fuzzy=d1a$tx, p=1, bwselect="msetwo", cluster=d1a$PROV_ID)
+gc()
+fuzz2auto<-rdrobust(x=d2a$hgb, y=d2a$death_hospice, c=7, fuzzy=d2a$tx, p=1, bwselect="msetwo", cluster=d2a$PROV_ID)
+gc()
+fuzz3auto<-rdrobust(x=d3a$hgb, y=d3a$death_hospice, c=7, fuzzy=d3a$tx, p=1, bwselect="msetwo", cluster=d3a$PROV_ID)
+gc()
+fuzz4auto<-rdrobust(x=d4a$hgb, y=d4a$death_hospice, c=7, fuzzy=d4a$tx, p=1, bwselect="msetwo", cluster=d4a$PROV_ID)
+gc()
+fuzz5auto<-rdrobust(x=d5a$hgb, y=d5a$death_hospice, c=7, fuzzy=d5a$tx, p=1, bwselect="msetwo", cluster=d5a$PROV_ID)
+gc()
+fuzz6auto<-rdrobust(x=d6a$hgb, y=d6a$death_hospice, c=7, fuzzy=d6a$tx, p=1, bwselect="msetwo", cluster=d6a$PROV_ID)
+gc()
+fuzz7auto<-rdrobust(x=d7a$hgb, y=d7a$death_hospice, c=7, fuzzy=d7a$tx, p=2, bwselect="msetwo", cluster=d7a$PROV_ID)
+gc()
+
+summary(fuzz1auto)
+summary(fuzz2auto)
+summary(fuzz3auto)
+summary(fuzz4auto)
+summary(fuzz5auto)
+summary(fuzz6auto)
+summary(fuzz7auto)
+
+rdd_outcome_fuzzyauto<-rbind(
+              rd_extraction(fuzz1auto),
+              rd_extraction(fuzz2auto),
+              rd_extraction(fuzz3auto),
+              rd_extraction(fuzz4auto),
+              rd_extraction(fuzz5auto),
+              rd_extraction(fuzz6auto),
+              rd_extraction(fuzz7auto)) %>%
+    data.frame() %>%
+  setNames(row.names)
+
+View(rdd_outcome_fuzzyauto)
+
+
+
+# one random hemoglobin per patient
+tr<-t %>%
+  group_by(PAT_KEY) %>%
+  sample_n(1)
+
+
+dr1<-tr %>% filter(hgb_day==1)
+gc()
+dr2<-tr %>% filter(hgb_day==2)
+gc()
+dr3<-tr %>% filter(hgb_day==3)
+gc()
+dr4<-tr %>% filter(hgb_day==4)
+gc()
+dr5<-tr %>% filter(hgb_day==5)
+gc()
+dr6<-tr %>% filter(hgb_day==6)
+gc()
+dr7<-tr %>% filter(hgb_day==7)
+gc()
+
+fuzz1r<-rdrobust(x=dr1$hgb, y=dr1$death_hospice, c=7, fuzzy=dr1$tx, p=1, h=1)
+gc()
+fuzz2r<-rdrobust(x=dr2$hgb, y=dr2$death_hospice, c=7, fuzzy=dr2$tx, p=1, h=1)
+gc()
+fuzz3r<-rdrobust(x=dr3$hgb, y=dr3$death_hospice, c=7, fuzzy=dr3$tx, p=1, h=1)
+gc()
+fuzz4r<-rdrobust(x=dr4$hgb, y=dr4$death_hospice, c=7, fuzzy=dr4$tx, p=1, h=1)
+gc()
+fuzz5r<-rdrobust(x=dr5$hgb, y=dr5$death_hospice, c=7, fuzzy=dr5$tx, p=1, h=1)
+gc()
+fuzz6r<-rdrobust(x=dr6$hgb, y=dr6$death_hospice, c=7, fuzzy=dr6$tx, p=1, h=1)
+gc()
+fuzz7r<-rdrobust(x=dr7$hgb, y=dr7$death_hospice, c=7, fuzzy=dr7$tx, p=1, h=1)
+gc()
+
+
+rdd_outcome_fuzzyr<-rbind(
+              rd_extraction(fuzz1r),
+              rd_extraction(fuzz2r),
+              rd_extraction(fuzz3r),
+              rd_extraction(fuzz4r),
+              rd_extraction(fuzz5r),
+              rd_extraction(fuzz6r),
+              rd_extraction(fuzz7r)) %>%
+    data.frame() %>%
+  setNames(row.names)
+
+View(rdd_outcome_fuzzyr)
+
+
+```
+
+
+# meta analysis sensitivity analyses
+```{r meta analysis sensitivity analyses}
+day=c(1,2,3,4,5,6,7)
+
+# local quadratic regression
+ma_fuzzyp2<-metagen(TE=rdd_outcome_fuzzyp2$coef, seTE=rdd_outcome_fuzzyp2$se, sm="RD", comb.random=T, studlab=day)
+ma_fuzzyp2
+
+mr_fuzzyp2<-metareg(ma_fuzzyp2, ~day)
+mr_fuzzyp2
+
+
+# half bandwidths
+ma_fuzzyh0.5<-metagen(TE=rdd_outcome_fuzzyh0.5$coef, seTE=rdd_outcome_fuzzyh0.5$se, sm="RD", comb.random=T, studlab=day)
+ma_fuzzyh0.5
+
+mr_fuzzyh0.5<-metareg(ma_fuzzyh0.5, ~day)
+mr_fuzzyh0.5
+
+
+# double bandwidths
+ma_fuzzyh2<-metagen(TE=rdd_outcome_fuzzyh2$coef, seTE=rdd_outcome_fuzzyh2$se, sm="RD", comb.random=T, studlab=day)
+ma_fuzzyh2
+
+mr_fuzzyh2<-metareg(ma_fuzzyh2, ~day)
+mr_fuzzyh2
+
+
+# automatic bandwidths
+ma_fuzzyauto<-metagen(TE=rdd_outcome_fuzzyauto$coef, seTE=rdd_outcome_fuzzyauto$se, sm="RD", comb.random=T, studlab=day)
+ma_fuzzyauto
+
+mr_fuzzyauto<-metareg(ma_fuzzyauto, ~day)
+mr_fuzzyauto
+
+
+# one random admission
+ma_fuzzyr<-metagen(TE=rdd_outcome_fuzzyr$coef, seTE=rdd_outcome_fuzzyr$se, sm="RD", comb.random=T, studlab=day)
+ma_fuzzyr
+
+mr_fuzzyr<-metareg(ma_fuzzyr, ~day)
+mr_fuzzyr
+
+
+
+```
+
+
+# plots by day
+```{r plots by day}
+# transfusion use
+gc()
+tx_plot_d1<-rdplot(y=d1$tx, x=d1$hgb, c=7, shade=F, ci=F, p=1, h=1, kernel="triangular")
+gc()
+tx_plot_d2<-rdplot(y=d2$tx, x=d2$hgb, c=7, shade=F, ci=F, p=1, h=1, kernel="triangular")
+gc()
+tx_plot_d3<-rdplot(y=d3$tx, x=d3$hgb, c=7, shade=F, ci=F, p=1, h=1, kernel="triangular")
+gc()
+tx_plot_d4<-rdplot(y=d4$tx, x=d4$hgb, c=7, shade=F, ci=F, p=1, h=1, kernel="triangular")
+gc()
+tx_plot_d5<-rdplot(y=d5$tx, x=d5$hgb, c=7, shade=F, ci=F, p=1, h=1, kernel="triangular")
+gc()
+tx_plot_d6<-rdplot(y=d6$tx, x=d6$hgb, c=7, shade=F, ci=F, p=1, h=1, kernel="triangular")
+gc()
+tx_plot_d7<-rdplot(y=d7$tx, x=d7$hgb, c=7, shade=F, ci=F, p=1, h=1, kernel="triangular")
+gc()
+
+plot_tx1<-tx_plot_d1$rdplot+
+  xlab("Hemoglobin concentration - g/dL")+
+  ylab("Probability of pRBC Transfusion ")+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+    coord_cartesian(ylim=c(0,1), xlim=c(6,8))+
+  ggtitle("Day 1")
+
+plot_tx2<-tx_plot_d2$rdplot+
+  xlab("Hemoglobin concentration - g/dL")+
+  ylab("Probability of pRBC Transfusion ")+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+  coord_cartesian(ylim=c(0,1), xlim=c(6,8))+
+  ggtitle("Day 2")
+
+plot_tx3<-tx_plot_d3$rdplot+
+  xlab("Hemoglobin concentration - g/dL")+
+  ylab("Probability of pRBC Transfusion ")+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+  coord_cartesian(ylim=c(0,1), xlim=c(6,8))+
+  ggtitle("Day 3")
+
+plot_tx4<-tx_plot_d4$rdplot+
+  xlab("Hemoglobin concentration - g/dL")+
+  ylab("Probability of pRBC Transfusion ")+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+  coord_cartesian(ylim=c(0,1), xlim=c(6,8))+
+  ggtitle("Day 4")
+
+plot_tx5<-tx_plot_d5$rdplot+
+  xlab("Hemoglobin concentration - g/dL")+
+  ylab("Probability of pRBC Transfusion ")+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+  coord_cartesian(ylim=c(0,1), xlim=c(6,8))+
+  ggtitle("Day 5")
+
+plot_tx6<-tx_plot_d6$rdplot+
+  xlab("Hemoglobin concentration - g/dL")+
+  ylab("Probability of pRBC Transfusion ")+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+  coord_cartesian(ylim=c(0,1), xlim=c(6,8))+
+  ggtitle("Day 6")
+
+plot_tx7<-tx_plot_d7$rdplot+
+  xlab("Hemoglobin concentration - g/dL")+
+  ylab("Probability of pRBC Transfusion ")+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+  coord_cartesian(ylim=c(0,1), xlim=c(6,8))+
+  ggtitle("Day 7")
+
+
+fig1<-gridExtra::arrangeGrob(
+  print(plot_tx1),
+  print(plot_tx2),
+  print(plot_tx3),
+  print(plot_tx4),
+  print(plot_tx5),
+  print(plot_tx6),
+  print(plot_tx7),
+  ncol=1)
+
+ggsave("hgb_tx_hte_rdd_11-22-2024.jpeg", width=10, height=20, fig1)
+
+
+# outcome
+gc()
+out_plot_d1<-rdplot(y=d1$death_hospice, x=d1$hgb, c=7, shade=F, ci=F, p=1, h=1, kernel="triangular")
+gc()
+out_plot_d2<-rdplot(y=d2$death_hospice, x=d2$hgb, c=7, shade=F, ci=F, p=1, h=1, kernel="triangular")
+gc()
+out_plot_d3<-rdplot(y=d3$death_hospice, x=d3$hgb, c=7, shade=F, ci=F, p=1, h=1, kernel="triangular")
+gc()
+out_plot_d4<-rdplot(y=d4$death_hospice, x=d4$hgb, c=7, shade=F, ci=F, p=1, h=1, kernel="triangular")
+gc()
+out_plot_d5<-rdplot(y=d5$death_hospice, x=d5$hgb, c=7, shade=F, ci=F, p=1, h=1, kernel="triangular")
+gc()
+out_plot_d6<-rdplot(y=d6$death_hospice, x=d6$hgb, c=7, shade=F, ci=F, p=1, h=1, kernel="triangular")
+gc()
+out_plot_d7<-rdplot(y=d7$death_hospice, x=d7$hgb, c=7, shade=F, ci=F, p=1, h=1, kernel="triangular")
+gc()
+
+plot_out1<-out_plot_d1$rdplot+
+  xlab("Hemoglobin concentration - g/dL")+
+  ylab("Probability of outcome")+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+  coord_cartesian(ylim=c(0.05,0.25), xlim=c(6,8))+
+  ggtitle("Day 1")
+
+plot_out2<-out_plot_d2$rdplot+
+  xlab("Hemoglobin concentration - g/dL")+
+  ylab("Probability of outcome")+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+  coord_cartesian(ylim=c(0.05,0.25), xlim=c(6,8))+
+  ggtitle("Day 2")
+
+plot_out3<-out_plot_d3$rdplot+
+  xlab("Hemoglobin concentration - g/dL")+
+  ylab("Probability of outcome")+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+  coord_cartesian(ylim=c(0.05,0.25), xlim=c(6,8))+
+  ggtitle("Day 3")
+
+plot_out4<-out_plot_d4$rdplot+
+  xlab("Hemoglobin concentration - g/dL")+
+  ylab("Probability of outcome")+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+  coord_cartesian(ylim=c(0.05,0.25), xlim=c(6,8))+
+  ggtitle("Day 4")
+
+plot_out5<-out_plot_d5$rdplot+
+  xlab("Hemoglobin concentration - g/dL")+
+  ylab("Probability of outcome")+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+  coord_cartesian(ylim=c(0.05,0.25), xlim=c(6,8))+
+  ggtitle("Day 5")
+
+plot_out6<-out_plot_d6$rdplot+
+  xlab("Hemoglobin concentration - g/dL")+
+  ylab("Probability of outcome")+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+  coord_cartesian(ylim=c(0.05,0.25), xlim=c(6,8))+
+  ggtitle("Day 6")
+
+plot_out7<-out_plot_d7$rdplot+
+  xlab("Hemoglobin concentration - g/dL")+
+  ylab("Probability of outcome")+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())+
+  coord_cartesian(ylim=c(0.05,0.253), xlim=c(6,8))+
+  ggtitle("Day 7")
+
+
+fig2<-gridExtra::arrangeGrob(
+  print(plot_out1),
+  print(plot_out2),
+  print(plot_out3),
+  print(plot_out4),
+  print(plot_out5),
+  print(plot_out6),
+  print(plot_out7),
+  ncol=1)
+
+ggsave("hgb_out_hte_rdd_11-22-2024.jpeg", width=10, height=20, fig2)
+
+
+```
+
+
+
+
+
+# explatory analyses
+```{r exploratory}
+day=c(1,2,3,4,5,6,7)
+
+# previous transfusion
+d2prior_tx<-d2t %>% filter(tx_before==1)
+d3prior_tx<-d3t %>% filter(tx_before==1)
+d4prior_tx<-d4t %>% filter(tx_before==1)
+d5prior_tx<-d5t %>% filter(tx_before==1)
+d5prior_tx<-d5t %>% filter(tx_before==1)
+d6prior_tx<-d6t %>% filter(tx_before==1)
+d7prior_tx<-d7t %>% filter(tx_before==1)
+
+d1nprior_tx<-d1t %>% filter(tx_before==0)
+d2nprior_tx<-d2t %>% filter(tx_before==0)
+d3nprior_tx<-d3t %>% filter(tx_before==0)
+d4nprior_tx<-d4t %>% filter(tx_before==0)
+d5nprior_tx<-d5t %>% filter(tx_before==0)
+d6nprior_tx<-d6t %>% filter(tx_before==0)
+d7nprior_tx<-d7t %>% filter(tx_before==0)
+
+fuzz2prior_tx<-rdrobust(x=d2prior_tx$hgb, y=d2prior_tx$death_hospice, c=7, fuzzy=d2prior_tx$tx, p=1, h=1)
+gc()
+fuzz3prior_tx<-rdrobust(x=d3prior_tx$hgb, y=d3prior_tx$death_hospice, c=7, fuzzy=d3prior_tx$tx, p=1, h=1)
+gc()
+fuzz4prior_tx<-rdrobust(x=d4prior_tx$hgb, y=d4prior_tx$death_hospice, c=7, fuzzy=d4prior_tx$tx, p=1, h=1)
+gc()
+fuzz5prior_tx<-rdrobust(x=d5prior_tx$hgb, y=d5prior_tx$death_hospice, c=7, fuzzy=d5prior_tx$tx, p=1, h=1)
+gc()
+fuzz6prior_tx<-rdrobust(x=d6prior_tx$hgb, y=d6prior_tx$death_hospice, c=7, fuzzy=d6prior_tx$tx, p=1, h=1)
+gc()
+fuzz7prior_tx<-rdrobust(x=d7prior_tx$hgb, y=d7prior_tx$death_hospice, c=7, fuzzy=d7prior_tx$tx, p=1, h=1)
+gc()
+
+
+rdd_outcome_fuzzyprior_tx<-rbind(
+              rd_extraction(fuzz2prior_tx),
+              rd_extraction(fuzz3prior_tx),
+              rd_extraction(fuzz4prior_tx),
+              rd_extraction(fuzz5prior_tx),
+              rd_extraction(fuzz6prior_tx),
+              rd_extraction(fuzz7prior_tx)) %>%
+    data.frame() %>%
+  setNames(row.names)
+
+View(rdd_outcome_fuzzyprior_tx)
+
+
+fuzz1nprior_tx<-rdrobust(x=d1nprior_tx$hgb, y=d1nprior_tx$death_hospice, c=7, fuzzy=d1nprior_tx$tx, p=1, h=1)
+gc()
+fuzz2nprior_tx<-rdrobust(x=d2nprior_tx$hgb, y=d2nprior_tx$death_hospice, c=7, fuzzy=d2nprior_tx$tx, p=1, h=1)
+gc()
+fuzz3nprior_tx<-rdrobust(x=d3nprior_tx$hgb, y=d3nprior_tx$death_hospice, c=7, fuzzy=d3nprior_tx$tx, p=1, h=1)
+gc()
+fuzz4nprior_tx<-rdrobust(x=d4nprior_tx$hgb, y=d4nprior_tx$death_hospice, c=7, fuzzy=d4nprior_tx$tx, p=1, h=1)
+gc()
+fuzz5nprior_tx<-rdrobust(x=d5nprior_tx$hgb, y=d5nprior_tx$death_hospice, c=7, fuzzy=d5nprior_tx$tx, p=1, h=1)
+gc()
+fuzz6nprior_tx<-rdrobust(x=d6nprior_tx$hgb, y=d6nprior_tx$death_hospice, c=7, fuzzy=d6nprior_tx$tx, p=1, h=1)
+gc()
+fuzz7nprior_tx<-rdrobust(x=d7nprior_tx$hgb, y=d7nprior_tx$death_hospice, c=7, fuzzy=d7nprior_tx$tx, p=1, h=1)
+gc()
+
+
+rdd_outcome_fuzzynprior_tx<-rbind(
+              rd_extraction(fuzz1nprior_tx),
+              rd_extraction(fuzz2nprior_tx),
+              rd_extraction(fuzz3nprior_tx),
+              rd_extraction(fuzz4nprior_tx),
+              rd_extraction(fuzz5nprior_tx),
+              rd_extraction(fuzz6nprior_tx),
+              rd_extraction(fuzz7nprior_tx)) %>%
+    data.frame() %>%
+  setNames(row.names)
+
+View(rdd_outcome_fuzzynprior_tx)
+
+
+
+# ma_prior_tx
+day2<-c(2,3,4,5,6,7)
+ma_prior_tx<-metagen(TE=rdd_outcome_fuzzyprior_tx$coef, seTE=rdd_outcome_fuzzyprior_tx$se, sm="RD", comb.random=T, studlab=day2)
+ma_prior_tx
+
+mr_prior_tx<-metareg(ma_prior_tx, ~day2)
+mr_prior_tx
+
+# ma_nprior_tx
+ma_nprior_tx<-metagen(TE=rdd_outcome_fuzzynprior_tx$coef, seTE=rdd_outcome_fuzzynprior_tx$se, sm="RD", comb.random=T, studlab=day)
+ma_nprior_tx
+
+mr_nprior_tx<-metareg(ma_nprior_tx, ~day)
+mr_nprior_tx
+
+gc()
+
+
+
+
+
+# icu 
+d1icu<-d1t %>% filter(icu_on_day==1)
+d2icu<-d2t %>% filter(icu_on_day==1)
+d3icu<-d3t %>% filter(icu_on_day==1)
+d4icu<-d4t %>% filter(icu_on_day==1)
+d5icu<-d5t %>% filter(icu_on_day==1)
+d5icu<-d5t %>% filter(icu_on_day==1)
+d6icu<-d6t %>% filter(icu_on_day==1)
+d7icu<-d7t %>% filter(icu_on_day==1)
+
+d1nicu<-d1t %>% filter(icu_on_day==0)
+d2nicu<-d2t %>% filter(icu_on_day==0)
+d3nicu<-d3t %>% filter(icu_on_day==0)
+d4nicu<-d4t %>% filter(icu_on_day==0)
+d5nicu<-d5t %>% filter(icu_on_day==0)
+d6nicu<-d6t %>% filter(icu_on_day==0)
+d7nicu<-d7t %>% filter(icu_on_day==0)
+
+fuzz1icu<-rdrobust(x=d1icu$hgb, y=d1icu$death_hospice, c=7, fuzzy=d1icu$tx, p=1, h=1)
+gc()
+fuzz2icu<-rdrobust(x=d2icu$hgb, y=d2icu$death_hospice, c=7, fuzzy=d2icu$tx, p=1, h=1)
+gc()
+fuzz3icu<-rdrobust(x=d3icu$hgb, y=d3icu$death_hospice, c=7, fuzzy=d3icu$tx, p=1, h=1)
+gc()
+fuzz4icu<-rdrobust(x=d4icu$hgb, y=d4icu$death_hospice, c=7, fuzzy=d4icu$tx, p=1, h=1)
+gc()
+fuzz5icu<-rdrobust(x=d5icu$hgb, y=d5icu$death_hospice, c=7, fuzzy=d5icu$tx, p=1, h=1)
+gc()
+fuzz6icu<-rdrobust(x=d6icu$hgb, y=d6icu$death_hospice, c=7, fuzzy=d6icu$tx, p=1, h=1)
+gc()
+fuzz7icu<-rdrobust(x=d7icu$hgb, y=d7icu$death_hospice, c=7, fuzzy=d7icu$tx, p=1, h=1)
+gc()
+
+
+rdd_outcome_fuzzyicu<-rbind(
+              rd_extraction(fuzz1icu),
+              rd_extraction(fuzz2icu),
+              rd_extraction(fuzz3icu),
+              rd_extraction(fuzz4icu),
+              rd_extraction(fuzz5icu),
+              rd_extraction(fuzz6icu),
+              rd_extraction(fuzz7icu)) %>%
+    data.frame() %>%
+  setNames(row.names)
+
+View(rdd_outcome_fuzzyicu)
+
+
+fuzz1nicu<-rdrobust(x=d1nicu$hgb, y=d1nicu$death_hospice, c=7, fuzzy=d1nicu$tx, p=1, h=1)
+gc()
+fuzz2nicu<-rdrobust(x=d2nicu$hgb, y=d2nicu$death_hospice, c=7, fuzzy=d2nicu$tx, p=1, h=1)
+gc()
+fuzz3nicu<-rdrobust(x=d3nicu$hgb, y=d3nicu$death_hospice, c=7, fuzzy=d3nicu$tx, p=1, h=1)
+gc()
+fuzz4nicu<-rdrobust(x=d4nicu$hgb, y=d4nicu$death_hospice, c=7, fuzzy=d4nicu$tx, p=1, h=1)
+gc()
+fuzz5nicu<-rdrobust(x=d5nicu$hgb, y=d5nicu$death_hospice, c=7, fuzzy=d5nicu$tx, p=1, h=1)
+gc()
+fuzz6nicu<-rdrobust(x=d6nicu$hgb, y=d6nicu$death_hospice, c=7, fuzzy=d6nicu$tx, p=1, h=1)
+gc()
+fuzz7nicu<-rdrobust(x=d7nicu$hgb, y=d7nicu$death_hospice, c=7, fuzzy=d7nicu$tx, p=1, h=1)
+gc()
+
+
+rdd_outcome_fuzzynicu<-rbind(
+              rd_extraction(fuzz1nicu),
+              rd_extraction(fuzz2nicu),
+              rd_extraction(fuzz3nicu),
+              rd_extraction(fuzz4nicu),
+              rd_extraction(fuzz5nicu),
+              rd_extraction(fuzz6nicu),
+              rd_extraction(fuzz7nicu)) %>%
+    data.frame() %>%
+  setNames(row.names)
+
+View(rdd_outcome_fuzzynicu)
+
+
+# ma_icu
+ma_icu<-metagen(TE=rdd_outcome_fuzzyicu$coef, seTE=rdd_outcome_fuzzyicu$se, sm="RD", comb.random=T, studlab=day)
+ma_icu
+
+mr_icu<-metareg(ma_icu, ~day)
+mr_icu
+
+# ma_nicu
+ma_nicu<-metagen(TE=rdd_outcome_fuzzynicu$coef, seTE=rdd_outcome_fuzzynicu$se, sm="RD", comb.random=T, studlab=day)
+ma_nicu
+
+mr_nicu<-metareg(ma_nicu, ~day)
+mr_nicu
+
+
+
+# age65 
+d1age65<-d1t %>% filter(age65==1)
+d2age65<-d2t %>% filter(age65==1)
+d3age65<-d3t %>% filter(age65==1)
+d4age65<-d4t %>% filter(age65==1)
+d5age65<-d5t %>% filter(age65==1)
+d5age65<-d5t %>% filter(age65==1)
+d6age65<-d6t %>% filter(age65==1)
+d7age65<-d7t %>% filter(age65==1)
+
+d1nage65<-d1t %>% filter(age65==0)
+d2nage65<-d2t %>% filter(age65==0)
+d3nage65<-d3t %>% filter(age65==0)
+d4nage65<-d4t %>% filter(age65==0)
+d5nage65<-d5t %>% filter(age65==0)
+d6nage65<-d6t %>% filter(age65==0)
+d7nage65<-d7t %>% filter(age65==0)
+
+fuzz1age65<-rdrobust(x=d1age65$hgb, y=d1age65$death_hospice, c=7, fuzzy=d1age65$tx, p=1, h=1)
+gc()
+fuzz2age65<-rdrobust(x=d2age65$hgb, y=d2age65$death_hospice, c=7, fuzzy=d2age65$tx, p=1, h=1)
+gc()
+fuzz3age65<-rdrobust(x=d3age65$hgb, y=d3age65$death_hospice, c=7, fuzzy=d3age65$tx, p=1, h=1)
+gc()
+fuzz4age65<-rdrobust(x=d4age65$hgb, y=d4age65$death_hospice, c=7, fuzzy=d4age65$tx, p=1, h=1)
+gc()
+fuzz5age65<-rdrobust(x=d5age65$hgb, y=d5age65$death_hospice, c=7, fuzzy=d5age65$tx, p=1, h=1)
+gc()
+fuzz6age65<-rdrobust(x=d6age65$hgb, y=d6age65$death_hospice, c=7, fuzzy=d6age65$tx, p=1, h=1)
+gc()
+fuzz7age65<-rdrobust(x=d7age65$hgb, y=d7age65$death_hospice, c=7, fuzzy=d7age65$tx, p=1, h=1)
+gc()
+
+
+rdd_outcome_fuzzyage65<-rbind(
+              rd_extraction(fuzz1age65),
+              rd_extraction(fuzz2age65),
+              rd_extraction(fuzz3age65),
+              rd_extraction(fuzz4age65),
+              rd_extraction(fuzz5age65),
+              rd_extraction(fuzz6age65),
+              rd_extraction(fuzz7age65)) %>%
+    data.frame() %>%
+  setNames(row.names)
+
+View(rdd_outcome_fuzzyage65)
+
+
+fuzz1nage65<-rdrobust(x=d1nage65$hgb, y=d1nage65$death_hospice, c=7, fuzzy=d1nage65$tx, p=1, h=1)
+gc()
+fuzz2nage65<-rdrobust(x=d2nage65$hgb, y=d2nage65$death_hospice, c=7, fuzzy=d2nage65$tx, p=1, h=1)
+gc()
+fuzz3nage65<-rdrobust(x=d3nage65$hgb, y=d3nage65$death_hospice, c=7, fuzzy=d3nage65$tx, p=1, h=1)
+gc()
+fuzz4nage65<-rdrobust(x=d4nage65$hgb, y=d4nage65$death_hospice, c=7, fuzzy=d4nage65$tx, p=1, h=1)
+gc()
+fuzz5nage65<-rdrobust(x=d5nage65$hgb, y=d5nage65$death_hospice, c=7, fuzzy=d5nage65$tx, p=1, h=1)
+gc()
+fuzz6nage65<-rdrobust(x=d6nage65$hgb, y=d6nage65$death_hospice, c=7, fuzzy=d6nage65$tx, p=1, h=1)
+gc()
+fuzz7nage65<-rdrobust(x=d7nage65$hgb, y=d7nage65$death_hospice, c=7, fuzzy=d7nage65$tx, p=1, h=1)
+gc()
+
+
+rdd_outcome_fuzzynage65<-rbind(
+              rd_extraction(fuzz1nage65),
+              rd_extraction(fuzz2nage65),
+              rd_extraction(fuzz3nage65),
+              rd_extraction(fuzz4nage65),
+              rd_extraction(fuzz5nage65),
+              rd_extraction(fuzz6nage65),
+              rd_extraction(fuzz7nage65)) %>%
+    data.frame() %>%
+  setNames(row.names)
+
+View(rdd_outcome_fuzzynage65)
+
+
+# ma_age65
+ma_age65<-metagen(TE=rdd_outcome_fuzzyage65$coef, seTE=rdd_outcome_fuzzyage65$se, sm="RD", comb.random=T, studlab=day)
+ma_age65
+
+mr_age65<-metareg(ma_age65, ~day)
+mr_age65
+
+# ma_nage65
+ma_nage65<-metagen(TE=rdd_outcome_fuzzynage65$coef, seTE=rdd_outcome_fuzzynage65$se, sm="RD", comb.random=T, studlab=day)
+ma_nage65
+
+mr_nage65<-metareg(ma_nage65, ~day)
+mr_nage65
+
+gc()
+
+
+# fsex 
+d1fsex<-d1t %>% filter(fsex==1)
+d2fsex<-d2t %>% filter(fsex==1)
+d3fsex<-d3t %>% filter(fsex==1)
+d4fsex<-d4t %>% filter(fsex==1)
+d5fsex<-d5t %>% filter(fsex==1)
+d5fsex<-d5t %>% filter(fsex==1)
+d6fsex<-d6t %>% filter(fsex==1)
+d7fsex<-d7t %>% filter(fsex==1)
+
+d1nfsex<-d1t %>% filter(fsex==0)
+d2nfsex<-d2t %>% filter(fsex==0)
+d3nfsex<-d3t %>% filter(fsex==0)
+d4nfsex<-d4t %>% filter(fsex==0)
+d5nfsex<-d5t %>% filter(fsex==0)
+d6nfsex<-d6t %>% filter(fsex==0)
+d7nfsex<-d7t %>% filter(fsex==0)
+
+fuzz1fsex<-rdrobust(x=d1fsex$hgb, y=d1fsex$death_hospice, c=7, fuzzy=d1fsex$tx, p=1, h=1)
+gc()
+fuzz2fsex<-rdrobust(x=d2fsex$hgb, y=d2fsex$death_hospice, c=7, fuzzy=d2fsex$tx, p=1, h=1)
+gc()
+fuzz3fsex<-rdrobust(x=d3fsex$hgb, y=d3fsex$death_hospice, c=7, fuzzy=d3fsex$tx, p=1, h=1)
+gc()
+fuzz4fsex<-rdrobust(x=d4fsex$hgb, y=d4fsex$death_hospice, c=7, fuzzy=d4fsex$tx, p=1, h=1)
+gc()
+fuzz5fsex<-rdrobust(x=d5fsex$hgb, y=d5fsex$death_hospice, c=7, fuzzy=d5fsex$tx, p=1, h=1)
+gc()
+fuzz6fsex<-rdrobust(x=d6fsex$hgb, y=d6fsex$death_hospice, c=7, fuzzy=d6fsex$tx, p=1, h=1)
+gc()
+fuzz7fsex<-rdrobust(x=d7fsex$hgb, y=d7fsex$death_hospice, c=7, fuzzy=d7fsex$tx, p=1, h=1)
+gc()
+
+
+rdd_outcome_fuzzyfsex<-rbind(
+              rd_extraction(fuzz1fsex),
+              rd_extraction(fuzz2fsex),
+              rd_extraction(fuzz3fsex),
+              rd_extraction(fuzz4fsex),
+              rd_extraction(fuzz5fsex),
+              rd_extraction(fuzz6fsex),
+              rd_extraction(fuzz7fsex)) %>%
+    data.frame() %>%
+  setNames(row.names)
+
+View(rdd_outcome_fuzzyfsex)
+
+
+fuzz1nfsex<-rdrobust(x=d1nfsex$hgb, y=d1nfsex$death_hospice, c=7, fuzzy=d1nfsex$tx, p=1, h=1)
+gc()
+fuzz2nfsex<-rdrobust(x=d2nfsex$hgb, y=d2nfsex$death_hospice, c=7, fuzzy=d2nfsex$tx, p=1, h=1)
+gc()
+fuzz3nfsex<-rdrobust(x=d3nfsex$hgb, y=d3nfsex$death_hospice, c=7, fuzzy=d3nfsex$tx, p=1, h=1)
+gc()
+fuzz4nfsex<-rdrobust(x=d4nfsex$hgb, y=d4nfsex$death_hospice, c=7, fuzzy=d4nfsex$tx, p=1, h=1)
+gc()
+fuzz5nfsex<-rdrobust(x=d5nfsex$hgb, y=d5nfsex$death_hospice, c=7, fuzzy=d5nfsex$tx, p=1, h=1)
+gc()
+fuzz6nfsex<-rdrobust(x=d6nfsex$hgb, y=d6nfsex$death_hospice, c=7, fuzzy=d6nfsex$tx, p=1, h=1)
+gc()
+fuzz7nfsex<-rdrobust(x=d7nfsex$hgb, y=d7nfsex$death_hospice, c=7, fuzzy=d7nfsex$tx, p=1, h=1)
+gc()
+
+
+rdd_outcome_fuzzynfsex<-rbind(
+              rd_extraction(fuzz1nfsex),
+              rd_extraction(fuzz2nfsex),
+              rd_extraction(fuzz3nfsex),
+              rd_extraction(fuzz4nfsex),
+              rd_extraction(fuzz5nfsex),
+              rd_extraction(fuzz6nfsex),
+              rd_extraction(fuzz7nfsex)) %>%
+    data.frame() %>%
+  setNames(row.names)
+
+View(rdd_outcome_fuzzynfsex)
+
+
+# ma_fsex
+ma_fsex<-metagen(TE=rdd_outcome_fuzzyfsex$coef, seTE=rdd_outcome_fuzzyfsex$se, sm="RD", comb.random=T, studlab=day)
+ma_fsex
+
+mr_fsex<-metareg(ma_fsex, ~day)
+mr_fsex
+
+# ma_nfsex
+ma_nfsex<-metagen(TE=rdd_outcome_fuzzynfsex$coef, seTE=rdd_outcome_fuzzynfsex$se, sm="RD", comb.random=T, studlab=day)
+ma_nfsex
+
+mr_nfsex<-metareg(ma_nfsex, ~day)
+mr_nfsex
+
+gc()
+
+# ami 
+d1circulatory_system<-d1t %>% filter(ami==1)
+d2circulatory_system<-d2t %>% filter(ami==1)
+d3circulatory_system<-d3t %>% filter(ami==1)
+d4circulatory_system<-d4t %>% filter(ami==1)
+d5circulatory_system<-d5t %>% filter(ami==1)
+d5circulatory_system<-d5t %>% filter(ami==1)
+d6circulatory_system<-d6t %>% filter(ami==1)
+d7circulatory_system<-d7t %>% filter(ami==1)
+
+d1ncirculatory_system<-d1t %>% filter(ami==0)
+d2ncirculatory_system<-d2t %>% filter(ami==0)
+d3ncirculatory_system<-d3t %>% filter(ami==0)
+d4ncirculatory_system<-d4t %>% filter(ami==0)
+d5ncirculatory_system<-d5t %>% filter(ami==0)
+d6ncirculatory_system<-d6t %>% filter(ami==0)
+d7ncirculatory_system<-d7t %>% filter(ami==0)
+
+fuzz1circulatory_system<-rdrobust(x=d1circulatory_system$hgb, y=d1circulatory_system$death_hospice, c=7, fuzzy=d1circulatory_system$tx, p=1, h=1)
+gc()
+fuzz2circulatory_system<-rdrobust(x=d2circulatory_system$hgb, y=d2circulatory_system$death_hospice, c=7, fuzzy=d2circulatory_system$tx, p=1, h=1)
+gc()
+fuzz3circulatory_system<-rdrobust(x=d3circulatory_system$hgb, y=d3circulatory_system$death_hospice, c=7, fuzzy=d3circulatory_system$tx, p=1, h=1)
+gc()
+fuzz4circulatory_system<-rdrobust(x=d4circulatory_system$hgb, y=d4circulatory_system$death_hospice, c=7, fuzzy=d4circulatory_system$tx, p=1, h=1)
+gc()
+fuzz5circulatory_system<-rdrobust(x=d5circulatory_system$hgb, y=d5circulatory_system$death_hospice, c=7, fuzzy=d5circulatory_system$tx, p=1, h=1)
+gc()
+fuzz6circulatory_system<-rdrobust(x=d6circulatory_system$hgb, y=d6circulatory_system$death_hospice, c=7, fuzzy=d6circulatory_system$tx, p=1, h=1)
+gc()
+fuzz7circulatory_system<-rdrobust(x=d7circulatory_system$hgb, y=d7circulatory_system$death_hospice, c=7, fuzzy=d7circulatory_system$tx, p=1, h=1)
+gc()
+
+
+rdd_outcome_fuzzycirculatory_system<-rbind(
+              rd_extraction(fuzz1circulatory_system),
+              rd_extraction(fuzz2circulatory_system),
+              rd_extraction(fuzz3circulatory_system),
+              rd_extraction(fuzz4circulatory_system),
+              rd_extraction(fuzz5circulatory_system),
+              rd_extraction(fuzz6circulatory_system),
+              rd_extraction(fuzz7circulatory_system)) %>%
+    data.frame() %>%
+  setNames(row.names)
+
+View(rdd_outcome_fuzzycirculatory_system)
+
+
+fuzz1ncirculatory_system<-rdrobust(x=d1ncirculatory_system$hgb, y=d1ncirculatory_system$death_hospice, c=7, fuzzy=d1ncirculatory_system$tx, p=1, h=1)
+gc()
+fuzz2ncirculatory_system<-rdrobust(x=d2ncirculatory_system$hgb, y=d2ncirculatory_system$death_hospice, c=7, fuzzy=d2ncirculatory_system$tx, p=1, h=1)
+gc()
+fuzz3ncirculatory_system<-rdrobust(x=d3ncirculatory_system$hgb, y=d3ncirculatory_system$death_hospice, c=7, fuzzy=d3ncirculatory_system$tx, p=1, h=1)
+gc()
+fuzz4ncirculatory_system<-rdrobust(x=d4ncirculatory_system$hgb, y=d4ncirculatory_system$death_hospice, c=7, fuzzy=d4ncirculatory_system$tx, p=1, h=1)
+gc()
+fuzz5ncirculatory_system<-rdrobust(x=d5ncirculatory_system$hgb, y=d5ncirculatory_system$death_hospice, c=7, fuzzy=d5ncirculatory_system$tx, p=1, h=1)
+gc()
+fuzz6ncirculatory_system<-rdrobust(x=d6ncirculatory_system$hgb, y=d6ncirculatory_system$death_hospice, c=7, fuzzy=d6ncirculatory_system$tx, p=1, h=1)
+gc()
+fuzz7ncirculatory_system<-rdrobust(x=d7ncirculatory_system$hgb, y=d7ncirculatory_system$death_hospice, c=7, fuzzy=d7ncirculatory_system$tx, p=1, h=1)
+gc()
+
+
+rdd_outcome_fuzzyncirculatory_system<-rbind(
+              rd_extraction(fuzz1ncirculatory_system),
+              rd_extraction(fuzz2ncirculatory_system),
+              rd_extraction(fuzz3ncirculatory_system),
+              rd_extraction(fuzz4ncirculatory_system),
+              rd_extraction(fuzz5ncirculatory_system),
+              rd_extraction(fuzz6ncirculatory_system),
+              rd_extraction(fuzz7ncirculatory_system)) %>%
+    data.frame() %>%
+  setNames(row.names)
+
+View(rdd_outcome_fuzzyncirculatory_system)
+
+
+# ma_circulatory_system
+ma_circulatory_system<-metagen(TE=rdd_outcome_fuzzycirculatory_system$coef, seTE=rdd_outcome_fuzzycirculatory_system$se, sm="RD", comb.random=T, studlab=day)
+ma_circulatory_system
+
+mr_circulatory_system<-metareg(ma_circulatory_system, ~day)
+mr_circulatory_system
+
+# ma_ncirculatory_system
+ma_ncirculatory_system<-metagen(TE=rdd_outcome_fuzzyncirculatory_system$coef, seTE=rdd_outcome_fuzzyncirculatory_system$se, sm="RD", comb.random=T, studlab=day)
+ma_ncirculatory_system
+
+mr_ncirculatory_system<-metareg(ma_ncirculatory_system, ~day)
+mr_ncirculatory_system
+
+gc()
+
+
+
+# sepsis 
+d1sepsis<-d1t %>% filter(angus_sepsis_poa==1)
+d2sepsis<-d2t %>% filter(angus_sepsis_poa==1)
+d3sepsis<-d3t %>% filter(angus_sepsis_poa==1)
+d4sepsis<-d4t %>% filter(angus_sepsis_poa==1)
+d5sepsis<-d5t %>% filter(angus_sepsis_poa==1)
+d5sepsis<-d5t %>% filter(angus_sepsis_poa==1)
+d6sepsis<-d6t %>% filter(angus_sepsis_poa==1)
+d7sepsis<-d7t %>% filter(angus_sepsis_poa==1)
+
+d1nsepsis<-d1t %>% filter(angus_sepsis_poa==0)
+d2nsepsis<-d2t %>% filter(angus_sepsis_poa==0)
+d3nsepsis<-d3t %>% filter(angus_sepsis_poa==0)
+d4nsepsis<-d4t %>% filter(angus_sepsis_poa==0)
+d5nsepsis<-d5t %>% filter(angus_sepsis_poa==0)
+d6nsepsis<-d6t %>% filter(angus_sepsis_poa==0)
+d7nsepsis<-d7t %>% filter(angus_sepsis_poa==0)
+
+fuzz1sepsis<-rdrobust(x=d1sepsis$hgb, y=d1sepsis$death_hospice, c=7, fuzzy=d1sepsis$tx, p=1, h=1)
+gc()
+fuzz2sepsis<-rdrobust(x=d2sepsis$hgb, y=d2sepsis$death_hospice, c=7, fuzzy=d2sepsis$tx, p=1, h=1)
+gc()
+fuzz3sepsis<-rdrobust(x=d3sepsis$hgb, y=d3sepsis$death_hospice, c=7, fuzzy=d3sepsis$tx, p=1, h=1)
+gc()
+fuzz4sepsis<-rdrobust(x=d4sepsis$hgb, y=d4sepsis$death_hospice, c=7, fuzzy=d4sepsis$tx, p=1, h=1)
+gc()
+fuzz5sepsis<-rdrobust(x=d5sepsis$hgb, y=d5sepsis$death_hospice, c=7, fuzzy=d5sepsis$tx, p=1, h=1)
+gc()
+fuzz6sepsis<-rdrobust(x=d6sepsis$hgb, y=d6sepsis$death_hospice, c=7, fuzzy=d6sepsis$tx, p=1, h=1)
+gc()
+fuzz7sepsis<-rdrobust(x=d7sepsis$hgb, y=d7sepsis$death_hospice, c=7, fuzzy=d7sepsis$tx, p=1, h=1)
+gc()
+
+
+rdd_outcome_fuzzysepsis<-rbind(
+              rd_extraction(fuzz1sepsis),
+              rd_extraction(fuzz2sepsis),
+              rd_extraction(fuzz3sepsis),
+              rd_extraction(fuzz4sepsis),
+              rd_extraction(fuzz5sepsis),
+              rd_extraction(fuzz6sepsis),
+              rd_extraction(fuzz7sepsis)) %>%
+    data.frame() %>%
+  setNames(row.names)
+
+View(rdd_outcome_fuzzysepsis)
+
+
+fuzz1nsepsis<-rdrobust(x=d1nsepsis$hgb, y=d1nsepsis$death_hospice, c=7, fuzzy=d1nsepsis$tx, p=1, h=1)
+gc()
+fuzz2nsepsis<-rdrobust(x=d2nsepsis$hgb, y=d2nsepsis$death_hospice, c=7, fuzzy=d2nsepsis$tx, p=1, h=1)
+gc()
+fuzz3nsepsis<-rdrobust(x=d3nsepsis$hgb, y=d3nsepsis$death_hospice, c=7, fuzzy=d3nsepsis$tx, p=1, h=1)
+gc()
+fuzz4nsepsis<-rdrobust(x=d4nsepsis$hgb, y=d4nsepsis$death_hospice, c=7, fuzzy=d4nsepsis$tx, p=1, h=1)
+gc()
+fuzz5nsepsis<-rdrobust(x=d5nsepsis$hgb, y=d5nsepsis$death_hospice, c=7, fuzzy=d5nsepsis$tx, p=1, h=1)
+gc()
+fuzz6nsepsis<-rdrobust(x=d6nsepsis$hgb, y=d6nsepsis$death_hospice, c=7, fuzzy=d6nsepsis$tx, p=1, h=1)
+gc()
+fuzz7nsepsis<-rdrobust(x=d7nsepsis$hgb, y=d7nsepsis$death_hospice, c=7, fuzzy=d7nsepsis$tx, p=1, h=1)
+gc()
+
+
+rdd_outcome_fuzzynsepsis<-rbind(
+              rd_extraction(fuzz1nsepsis),
+              rd_extraction(fuzz2nsepsis),
+              rd_extraction(fuzz3nsepsis),
+              rd_extraction(fuzz4nsepsis),
+              rd_extraction(fuzz5nsepsis),
+              rd_extraction(fuzz6nsepsis),
+              rd_extraction(fuzz7nsepsis)) %>%
+    data.frame() %>%
+  setNames(row.names)
+
+View(rdd_outcome_fuzzynsepsis)
+
+
+# ma_sepsis
+ma_sepsis<-metagen(TE=rdd_outcome_fuzzysepsis$coef, seTE=rdd_outcome_fuzzysepsis$se, sm="RD", comb.random=T, studlab=day)
+ma_sepsis
+
+mr_sepsis<-metareg(ma_sepsis, ~day)
+mr_sepsis
+
+# ma_nsepsis
+ma_nsepsis<-metagen(TE=rdd_outcome_fuzzynsepsis$coef, seTE=rdd_outcome_fuzzynsepsis$se, sm="RD", comb.random=T, studlab=day)
+ma_nsepsis
+
+mr_nsepsis<-metareg(ma_nsepsis, ~day)
+mr_nsepsis
+
+gc()
+
+
+
+
+# posthemorrhagic_anemia 
+d1posthemorrhagic_anemia<-d1t %>% filter(posthemorrhagic_anemia==1)
+d2posthemorrhagic_anemia<-d2t %>% filter(posthemorrhagic_anemia==1)
+d3posthemorrhagic_anemia<-d3t %>% filter(posthemorrhagic_anemia==1)
+d4posthemorrhagic_anemia<-d4t %>% filter(posthemorrhagic_anemia==1)
+d5posthemorrhagic_anemia<-d5t %>% filter(posthemorrhagic_anemia==1)
+d5posthemorrhagic_anemia<-d5t %>% filter(posthemorrhagic_anemia==1)
+d6posthemorrhagic_anemia<-d6t %>% filter(posthemorrhagic_anemia==1)
+d7posthemorrhagic_anemia<-d7t %>% filter(posthemorrhagic_anemia==1)
+
+d1nposthemorrhagic_anemia<-d1t %>% filter(posthemorrhagic_anemia==0)
+d2nposthemorrhagic_anemia<-d2t %>% filter(posthemorrhagic_anemia==0)
+d3nposthemorrhagic_anemia<-d3t %>% filter(posthemorrhagic_anemia==0)
+d4nposthemorrhagic_anemia<-d4t %>% filter(posthemorrhagic_anemia==0)
+d5nposthemorrhagic_anemia<-d5t %>% filter(posthemorrhagic_anemia==0)
+d6nposthemorrhagic_anemia<-d6t %>% filter(posthemorrhagic_anemia==0)
+d7nposthemorrhagic_anemia<-d7t %>% filter(posthemorrhagic_anemia==0)
+
+fuzz1posthemorrhagic_anemia<-rdrobust(x=d1posthemorrhagic_anemia$hgb, y=d1posthemorrhagic_anemia$death_hospice, c=7, fuzzy=d1posthemorrhagic_anemia$tx, p=1, h=1)
+gc()
+fuzz2posthemorrhagic_anemia<-rdrobust(x=d2posthemorrhagic_anemia$hgb, y=d2posthemorrhagic_anemia$death_hospice, c=7, fuzzy=d2posthemorrhagic_anemia$tx, p=1, h=1)
+gc()
+fuzz3posthemorrhagic_anemia<-rdrobust(x=d3posthemorrhagic_anemia$hgb, y=d3posthemorrhagic_anemia$death_hospice, c=7, fuzzy=d3posthemorrhagic_anemia$tx, p=1, h=1)
+gc()
+fuzz4posthemorrhagic_anemia<-rdrobust(x=d4posthemorrhagic_anemia$hgb, y=d4posthemorrhagic_anemia$death_hospice, c=7, fuzzy=d4posthemorrhagic_anemia$tx, p=1, h=1)
+gc()
+fuzz5posthemorrhagic_anemia<-rdrobust(x=d5posthemorrhagic_anemia$hgb, y=d5posthemorrhagic_anemia$death_hospice, c=7, fuzzy=d5posthemorrhagic_anemia$tx, p=1, h=1)
+gc()
+fuzz6posthemorrhagic_anemia<-rdrobust(x=d6posthemorrhagic_anemia$hgb, y=d6posthemorrhagic_anemia$death_hospice, c=7, fuzzy=d6posthemorrhagic_anemia$tx, p=1, h=1)
+gc()
+fuzz7posthemorrhagic_anemia<-rdrobust(x=d7posthemorrhagic_anemia$hgb, y=d7posthemorrhagic_anemia$death_hospice, c=7, fuzzy=d7posthemorrhagic_anemia$tx, p=1, h=1)
+gc()
+
+
+rdd_outcome_fuzzyposthemorrhagic_anemia<-rbind(
+              rd_extraction(fuzz1posthemorrhagic_anemia),
+              rd_extraction(fuzz2posthemorrhagic_anemia),
+              rd_extraction(fuzz3posthemorrhagic_anemia),
+              rd_extraction(fuzz4posthemorrhagic_anemia),
+              rd_extraction(fuzz5posthemorrhagic_anemia),
+              rd_extraction(fuzz6posthemorrhagic_anemia),
+              rd_extraction(fuzz7posthemorrhagic_anemia)) %>%
+    data.frame() %>%
+  setNames(row.names)
+
+View(rdd_outcome_fuzzyposthemorrhagic_anemia)
+
+
+fuzz1nposthemorrhagic_anemia<-rdrobust(x=d1nposthemorrhagic_anemia$hgb, y=d1nposthemorrhagic_anemia$death_hospice, c=7, fuzzy=d1nposthemorrhagic_anemia$tx, p=1, h=1)
+gc()
+fuzz2nposthemorrhagic_anemia<-rdrobust(x=d2nposthemorrhagic_anemia$hgb, y=d2nposthemorrhagic_anemia$death_hospice, c=7, fuzzy=d2nposthemorrhagic_anemia$tx, p=1, h=1)
+gc()
+fuzz3nposthemorrhagic_anemia<-rdrobust(x=d3nposthemorrhagic_anemia$hgb, y=d3nposthemorrhagic_anemia$death_hospice, c=7, fuzzy=d3nposthemorrhagic_anemia$tx, p=1, h=1)
+gc()
+fuzz4nposthemorrhagic_anemia<-rdrobust(x=d4nposthemorrhagic_anemia$hgb, y=d4nposthemorrhagic_anemia$death_hospice, c=7, fuzzy=d4nposthemorrhagic_anemia$tx, p=1, h=1)
+gc()
+fuzz5nposthemorrhagic_anemia<-rdrobust(x=d5nposthemorrhagic_anemia$hgb, y=d5nposthemorrhagic_anemia$death_hospice, c=7, fuzzy=d5nposthemorrhagic_anemia$tx, p=1, h=1)
+gc()
+fuzz6nposthemorrhagic_anemia<-rdrobust(x=d6nposthemorrhagic_anemia$hgb, y=d6nposthemorrhagic_anemia$death_hospice, c=7, fuzzy=d6nposthemorrhagic_anemia$tx, p=1, h=1)
+gc()
+fuzz7nposthemorrhagic_anemia<-rdrobust(x=d7nposthemorrhagic_anemia$hgb, y=d7nposthemorrhagic_anemia$death_hospice, c=7, fuzzy=d7nposthemorrhagic_anemia$tx, p=1, h=1)
+gc()
+
+
+rdd_outcome_fuzzynposthemorrhagic_anemia<-rbind(
+              rd_extraction(fuzz1nposthemorrhagic_anemia),
+              rd_extraction(fuzz2nposthemorrhagic_anemia),
+              rd_extraction(fuzz3nposthemorrhagic_anemia),
+              rd_extraction(fuzz4nposthemorrhagic_anemia),
+              rd_extraction(fuzz5nposthemorrhagic_anemia),
+              rd_extraction(fuzz6nposthemorrhagic_anemia),
+              rd_extraction(fuzz7nposthemorrhagic_anemia)) %>%
+    data.frame() %>%
+  setNames(row.names)
+
+View(rdd_outcome_fuzzynposthemorrhagic_anemia)
+
+
+# ma_posthemorrhagic_anemia
+ma_posthemorrhagic_anemia<-metagen(TE=rdd_outcome_fuzzyposthemorrhagic_anemia$coef, seTE=rdd_outcome_fuzzyposthemorrhagic_anemia$se, sm="RD", comb.random=T, studlab=day)
+ma_posthemorrhagic_anemia
+
+mr_posthemorrhagic_anemia<-metareg(ma_posthemorrhagic_anemia, ~day)
+mr_posthemorrhagic_anemia
+
+# ma_nposthemorrhagic_anemia
+ma_nposthemorrhagic_anemia<-metagen(TE=rdd_outcome_fuzzynposthemorrhagic_anemia$coef, seTE=rdd_outcome_fuzzynposthemorrhagic_anemia$se, sm="RD", comb.random=T, studlab=day)
+ma_nposthemorrhagic_anemia
+
+mr_nposthemorrhagic_anemia<-metareg(ma_nposthemorrhagic_anemia, ~day)
+mr_nposthemorrhagic_anemia
+
+gc()
+
+
+
+
+
+
+
+# major_surgery_on_or_before_hgb_day 
+d1surgery<-d1t %>% filter(major_surgery_on_or_before_hgb_day==1)
+d2surgery<-d2t %>% filter(major_surgery_on_or_before_hgb_day==1)
+d3surgery<-d3t %>% filter(major_surgery_on_or_before_hgb_day==1)
+d4surgery<-d4t %>% filter(major_surgery_on_or_before_hgb_day==1)
+d5surgery<-d5t %>% filter(major_surgery_on_or_before_hgb_day==1)
+d5surgery<-d5t %>% filter(major_surgery_on_or_before_hgb_day==1)
+d6surgery<-d6t %>% filter(major_surgery_on_or_before_hgb_day==1)
+d7surgery<-d7t %>% filter(major_surgery_on_or_before_hgb_day==1)
+
+d1nsurgery<-d1t %>% filter(major_surgery_on_or_before_hgb_day==0)
+d2nsurgery<-d2t %>% filter(major_surgery_on_or_before_hgb_day==0)
+d3nsurgery<-d3t %>% filter(major_surgery_on_or_before_hgb_day==0)
+d4nsurgery<-d4t %>% filter(major_surgery_on_or_before_hgb_day==0)
+d5nsurgery<-d5t %>% filter(major_surgery_on_or_before_hgb_day==0)
+d6nsurgery<-d6t %>% filter(major_surgery_on_or_before_hgb_day==0)
+d7nsurgery<-d7t %>% filter(major_surgery_on_or_before_hgb_day==0)
+
+fuzz1surgery<-rdrobust(x=d1surgery$hgb, y=d1surgery$death_hospice, c=7, fuzzy=d1surgery$tx, p=1, h=1)
+gc()
+fuzz2surgery<-rdrobust(x=d2surgery$hgb, y=d2surgery$death_hospice, c=7, fuzzy=d2surgery$tx, p=1, h=1)
+gc()
+fuzz3surgery<-rdrobust(x=d3surgery$hgb, y=d3surgery$death_hospice, c=7, fuzzy=d3surgery$tx, p=1, h=1)
+gc()
+fuzz4surgery<-rdrobust(x=d4surgery$hgb, y=d4surgery$death_hospice, c=7, fuzzy=d4surgery$tx, p=1, h=1)
+gc()
+fuzz5surgery<-rdrobust(x=d5surgery$hgb, y=d5surgery$death_hospice, c=7, fuzzy=d5surgery$tx, p=1, h=1)
+gc()
+fuzz6surgery<-rdrobust(x=d6surgery$hgb, y=d6surgery$death_hospice, c=7, fuzzy=d6surgery$tx, p=1, h=1)
+gc()
+fuzz7surgery<-rdrobust(x=d7surgery$hgb, y=d7surgery$death_hospice, c=7, fuzzy=d7surgery$tx, p=1, h=1)
+gc()
+
+
+rdd_outcome_fuzzysurgery<-rbind(
+              rd_extraction(fuzz1surgery),
+              rd_extraction(fuzz2surgery),
+              rd_extraction(fuzz3surgery),
+              rd_extraction(fuzz4surgery),
+              rd_extraction(fuzz5surgery),
+              rd_extraction(fuzz6surgery),
+              rd_extraction(fuzz7surgery)) %>%
+    data.frame() %>%
+  setNames(row.names)
+
+View(rdd_outcome_fuzzysurgery)
+
+
+fuzz1nsurgery<-rdrobust(x=d1nsurgery$hgb, y=d1nsurgery$death_hospice, c=7, fuzzy=d1nsurgery$tx, p=1, h=1)
+gc()
+fuzz2nsurgery<-rdrobust(x=d2nsurgery$hgb, y=d2nsurgery$death_hospice, c=7, fuzzy=d2nsurgery$tx, p=1, h=1)
+gc()
+fuzz3nsurgery<-rdrobust(x=d3nsurgery$hgb, y=d3nsurgery$death_hospice, c=7, fuzzy=d3nsurgery$tx, p=1, h=1)
+gc()
+fuzz4nsurgery<-rdrobust(x=d4nsurgery$hgb, y=d4nsurgery$death_hospice, c=7, fuzzy=d4nsurgery$tx, p=1, h=1)
+gc()
+fuzz5nsurgery<-rdrobust(x=d5nsurgery$hgb, y=d5nsurgery$death_hospice, c=7, fuzzy=d5nsurgery$tx, p=1, h=1)
+gc()
+fuzz6nsurgery<-rdrobust(x=d6nsurgery$hgb, y=d6nsurgery$death_hospice, c=7, fuzzy=d6nsurgery$tx, p=1, h=1)
+gc()
+fuzz7nsurgery<-rdrobust(x=d7nsurgery$hgb, y=d7nsurgery$death_hospice, c=7, fuzzy=d7nsurgery$tx, p=1, h=1)
+gc()
+
+
+rdd_outcome_fuzzynsurgery<-rbind(
+              rd_extraction(fuzz1nsurgery),
+              rd_extraction(fuzz2nsurgery),
+              rd_extraction(fuzz3nsurgery),
+              rd_extraction(fuzz4nsurgery),
+              rd_extraction(fuzz5nsurgery),
+              rd_extraction(fuzz6nsurgery),
+              rd_extraction(fuzz7nsurgery)) %>%
+    data.frame() %>%
+  setNames(row.names)
+
+View(rdd_outcome_fuzzynsurgery)
+
+
+# ma_surgery
+ma_surgery<-metagen(TE=rdd_outcome_fuzzysurgery$coef, seTE=rdd_outcome_fuzzysurgery$se, sm="RD", comb.random=T, studlab=day)
+ma_surgery
+
+mr_surgery<-metareg(ma_surgery, ~day)
+mr_surgery
+
+# ma_nsurgery
+ma_nsurgery<-metagen(TE=rdd_outcome_fuzzynsurgery$coef, seTE=rdd_outcome_fuzzynsurgery$se, sm="RD", comb.random=T, studlab=day)
+ma_nsurgery
+
+mr_nsurgery<-metareg(ma_nsurgery, ~day)
+mr_nsurgery
+
+gc()
+
+
+
+# mcv 
+d1mcv<-d1t %>% filter(mcvm==1 & !is.na(mcv))
+d2mcv<-d2t %>% filter(mcvm==1 & !is.na(mcv))
+d3mcv<-d3t %>% filter(mcvm==1 & !is.na(mcv))
+d4mcv<-d4t %>% filter(mcvm==1 & !is.na(mcv))
+d5mcv<-d5t %>% filter(mcvm==1 & !is.na(mcv))
+d5mcv<-d5t %>% filter(mcvm==1 & !is.na(mcv))
+d6mcv<-d6t %>% filter(mcvm==1 & !is.na(mcv))
+d7mcv<-d7t %>% filter(mcvm==1 & !is.na(mcv))
+
+d1nmcv<-d1t %>% filter(mcvm==0 & !is.na(mcv))
+d2nmcv<-d2t %>% filter(mcvm==0 & !is.na(mcv))
+d3nmcv<-d3t %>% filter(mcvm==0 & !is.na(mcv))
+d4nmcv<-d4t %>% filter(mcvm==0 & !is.na(mcv))
+d5nmcv<-d5t %>% filter(mcvm==0 & !is.na(mcv))
+d6nmcv<-d6t %>% filter(mcvm==0 & !is.na(mcv))
+d7nmcv<-d7t %>% filter(mcvm==0 & !is.na(mcv))
+
+fuzz1mcv<-rdrobust(x=d1mcv$hgb, y=d1mcv$death_hospice, c=7, fuzzy=d1mcv$tx, p=1, h=1)
+gc()
+fuzz2mcv<-rdrobust(x=d2mcv$hgb, y=d2mcv$death_hospice, c=7, fuzzy=d2mcv$tx, p=1, h=1)
+gc()
+fuzz3mcv<-rdrobust(x=d3mcv$hgb, y=d3mcv$death_hospice, c=7, fuzzy=d3mcv$tx, p=1, h=1)
+gc()
+fuzz4mcv<-rdrobust(x=d4mcv$hgb, y=d4mcv$death_hospice, c=7, fuzzy=d4mcv$tx, p=1, h=1)
+gc()
+fuzz5mcv<-rdrobust(x=d5mcv$hgb, y=d5mcv$death_hospice, c=7, fuzzy=d5mcv$tx, p=1, h=1)
+gc()
+fuzz6mcv<-rdrobust(x=d6mcv$hgb, y=d6mcv$death_hospice, c=7, fuzzy=d6mcv$tx, p=1, h=1)
+gc()
+fuzz7mcv<-rdrobust(x=d7mcv$hgb, y=d7mcv$death_hospice, c=7, fuzzy=d7mcv$tx, p=1, h=1)
+gc()
+
+
+rdd_outcome_fuzzymcv<-rbind(
+              rd_extraction(fuzz1mcv),
+              rd_extraction(fuzz2mcv),
+              rd_extraction(fuzz3mcv),
+              rd_extraction(fuzz4mcv),
+              rd_extraction(fuzz5mcv),
+              rd_extraction(fuzz6mcv),
+              rd_extraction(fuzz7mcv)) %>%
+    data.frame() %>%
+  setNames(row.names)
+
+View(rdd_outcome_fuzzymcv)
+
+
+fuzz1nmcv<-rdrobust(x=d1nmcv$hgb, y=d1nmcv$death_hospice, c=7, fuzzy=d1nmcv$tx, p=1, h=1)
+gc()
+fuzz2nmcv<-rdrobust(x=d2nmcv$hgb, y=d2nmcv$death_hospice, c=7, fuzzy=d2nmcv$tx, p=1, h=1)
+gc()
+fuzz3nmcv<-rdrobust(x=d3nmcv$hgb, y=d3nmcv$death_hospice, c=7, fuzzy=d3nmcv$tx, p=1, h=1)
+gc()
+fuzz4nmcv<-rdrobust(x=d4nmcv$hgb, y=d4nmcv$death_hospice, c=7, fuzzy=d4nmcv$tx, p=1, h=1)
+gc()
+fuzz5nmcv<-rdrobust(x=d5nmcv$hgb, y=d5nmcv$death_hospice, c=7, fuzzy=d5nmcv$tx, p=1, h=1)
+gc()
+fuzz6nmcv<-rdrobust(x=d6nmcv$hgb, y=d6nmcv$death_hospice, c=7, fuzzy=d6nmcv$tx, p=1, h=1)
+gc()
+fuzz7nmcv<-rdrobust(x=d7nmcv$hgb, y=d7nmcv$death_hospice, c=7, fuzzy=d7nmcv$tx, p=1, h=1)
+gc()
+
+
+rdd_outcome_fuzzynmcv<-rbind(
+              rd_extraction(fuzz1nmcv),
+              rd_extraction(fuzz2nmcv),
+              rd_extraction(fuzz3nmcv),
+              rd_extraction(fuzz4nmcv),
+              rd_extraction(fuzz5nmcv),
+              rd_extraction(fuzz6nmcv),
+              rd_extraction(fuzz7nmcv)) %>%
+    data.frame() %>%
+  setNames(row.names)
+
+View(rdd_outcome_fuzzynmcv)
+
+
+# ma_mcv
+ma_mcv<-metagen(TE=rdd_outcome_fuzzymcv$coef, seTE=rdd_outcome_fuzzymcv$se, sm="RD", comb.random=T, studlab=day)
+ma_mcv
+
+mr_mcv<-metareg(ma_mcv, ~day)
+mr_mcv
+
+# ma_nmcv
+ma_nmcv<-metagen(TE=rdd_outcome_fuzzynmcv$coef, seTE=rdd_outcome_fuzzynmcv$se, sm="RD", comb.random=T, studlab=day)
+ma_nmcv
+
+mr_nmcv<-metareg(ma_nmcv, ~day)
+mr_nmcv
+
+gc()
+
+
+
+
+# rdw 
+d1rdw<-d1t %>% filter(rdwm==1 & !is.na(rdw))
+d2rdw<-d2t %>% filter(rdwm==1 & !is.na(rdw))
+d3rdw<-d3t %>% filter(rdwm==1 & !is.na(rdw))
+d4rdw<-d4t %>% filter(rdwm==1 & !is.na(rdw))
+d5rdw<-d5t %>% filter(rdwm==1 & !is.na(rdw))
+d5rdw<-d5t %>% filter(rdwm==1 & !is.na(rdw))
+d6rdw<-d6t %>% filter(rdwm==1 & !is.na(rdw))
+d7rdw<-d7t %>% filter(rdwm==1 & !is.na(rdw))
+
+d1nrdw<-d1t %>% filter(rdwm==0 & !is.na(rdw))
+d2nrdw<-d2t %>% filter(rdwm==0 & !is.na(rdw))
+d3nrdw<-d3t %>% filter(rdwm==0 & !is.na(rdw))
+d4nrdw<-d4t %>% filter(rdwm==0 & !is.na(rdw))
+d5nrdw<-d5t %>% filter(rdwm==0 & !is.na(rdw))
+d6nrdw<-d6t %>% filter(rdwm==0 & !is.na(rdw))
+d7nrdw<-d7t %>% filter(rdwm==0 & !is.na(rdw))
+
+fuzz1rdw<-rdrobust(x=d1rdw$hgb, y=d1rdw$death_hospice, c=7, fuzzy=d1rdw$tx, p=1, h=1)
+gc()
+fuzz2rdw<-rdrobust(x=d2rdw$hgb, y=d2rdw$death_hospice, c=7, fuzzy=d2rdw$tx, p=1, h=1)
+gc()
+fuzz3rdw<-rdrobust(x=d3rdw$hgb, y=d3rdw$death_hospice, c=7, fuzzy=d3rdw$tx, p=1, h=1)
+gc()
+fuzz4rdw<-rdrobust(x=d4rdw$hgb, y=d4rdw$death_hospice, c=7, fuzzy=d4rdw$tx, p=1, h=1)
+gc()
+fuzz5rdw<-rdrobust(x=d5rdw$hgb, y=d5rdw$death_hospice, c=7, fuzzy=d5rdw$tx, p=1, h=1)
+gc()
+fuzz6rdw<-rdrobust(x=d6rdw$hgb, y=d6rdw$death_hospice, c=7, fuzzy=d6rdw$tx, p=1, h=1)
+gc()
+fuzz7rdw<-rdrobust(x=d7rdw$hgb, y=d7rdw$death_hospice, c=7, fuzzy=d7rdw$tx, p=1, h=1)
+gc()
+
+
+rdd_outcome_fuzzyrdw<-rbind(
+              rd_extraction(fuzz1rdw),
+              rd_extraction(fuzz2rdw),
+              rd_extraction(fuzz3rdw),
+              rd_extraction(fuzz4rdw),
+              rd_extraction(fuzz5rdw),
+              rd_extraction(fuzz6rdw),
+              rd_extraction(fuzz7rdw)) %>%
+    data.frame() %>%
+  setNames(row.names)
+
+View(rdd_outcome_fuzzyrdw)
+
+
+fuzz1nrdw<-rdrobust(x=d1nrdw$hgb, y=d1nrdw$death_hospice, c=7, fuzzy=d1nrdw$tx, p=1, h=1)
+gc()
+fuzz2nrdw<-rdrobust(x=d2nrdw$hgb, y=d2nrdw$death_hospice, c=7, fuzzy=d2nrdw$tx, p=1, h=1)
+gc()
+fuzz3nrdw<-rdrobust(x=d3nrdw$hgb, y=d3nrdw$death_hospice, c=7, fuzzy=d3nrdw$tx, p=1, h=1)
+gc()
+fuzz4nrdw<-rdrobust(x=d4nrdw$hgb, y=d4nrdw$death_hospice, c=7, fuzzy=d4nrdw$tx, p=1, h=1)
+gc()
+fuzz5nrdw<-rdrobust(x=d5nrdw$hgb, y=d5nrdw$death_hospice, c=7, fuzzy=d5nrdw$tx, p=1, h=1)
+gc()
+fuzz6nrdw<-rdrobust(x=d6nrdw$hgb, y=d6nrdw$death_hospice, c=7, fuzzy=d6nrdw$tx, p=1, h=1)
+gc()
+fuzz7nrdw<-rdrobust(x=d7nrdw$hgb, y=d7nrdw$death_hospice, c=7, fuzzy=d7nrdw$tx, p=1, h=1)
+gc()
+
+
+rdd_outcome_fuzzynrdw<-rbind(
+              rd_extraction(fuzz1nrdw),
+              rd_extraction(fuzz2nrdw),
+              rd_extraction(fuzz3nrdw),
+              rd_extraction(fuzz4nrdw),
+              rd_extraction(fuzz5nrdw),
+              rd_extraction(fuzz6nrdw),
+              rd_extraction(fuzz7nrdw)) %>%
+    data.frame() %>%
+  setNames(row.names)
+
+View(rdd_outcome_fuzzynrdw)
+
+
+# ma_rdw
+ma_rdw<-metagen(TE=rdd_outcome_fuzzyrdw$coef, seTE=rdd_outcome_fuzzyrdw$se, sm="RD", comb.random=T, studlab=day)
+ma_rdw
+
+mr_rdw<-metareg(ma_rdw, ~day)
+mr_rdw
+
+# ma_nrdw
+ma_nrdw<-metagen(TE=rdd_outcome_fuzzynrdw$coef, seTE=rdd_outcome_fuzzynrdw$se, sm="RD", comb.random=T, studlab=day)
+ma_nrdw
+
+mr_nrdw<-metareg(ma_nrdw, ~day)
+mr_nrdw
+
+gc()
+
+
+# sofa
+d1sofa<-d1t %>% filter(msofa_totalim==1)
+d2sofa<-d2t %>% filter(msofa_totalim==1)
+d3sofa<-d3t %>% filter(msofa_totalim==1)
+d4sofa<-d4t %>% filter(msofa_totalim==1)
+d5sofa<-d5t %>% filter(msofa_totalim==1)
+d5sofa<-d5t %>% filter(msofa_totalim==1)
+d6sofa<-d6t %>% filter(msofa_totalim==1)
+d7sofa<-d7t %>% filter(msofa_totalim==1)
+
+d1nsofa<-d1t %>% filter(msofa_totalim==0)
+d2nsofa<-d2t %>% filter(msofa_totalim==0)
+d3nsofa<-d3t %>% filter(msofa_totalim==0)
+d4nsofa<-d4t %>% filter(msofa_totalim==0)
+d5nsofa<-d5t %>% filter(msofa_totalim==0)
+d6nsofa<-d6t %>% filter(msofa_totalim==0)
+d7nsofa<-d7t %>% filter(msofa_totalim==0)
+
+fuzz1sofa<-rdrobust(x=d1sofa$hgb, y=d1sofa$death_hospice, c=7, fuzzy=d1sofa$tx, p=1, h=1)
+gc()
+fuzz2sofa<-rdrobust(x=d2sofa$hgb, y=d2sofa$death_hospice, c=7, fuzzy=d2sofa$tx, p=1, h=1)
+gc()
+fuzz3sofa<-rdrobust(x=d3sofa$hgb, y=d3sofa$death_hospice, c=7, fuzzy=d3sofa$tx, p=1, h=1)
+gc()
+fuzz4sofa<-rdrobust(x=d4sofa$hgb, y=d4sofa$death_hospice, c=7, fuzzy=d4sofa$tx, p=1, h=1)
+gc()
+fuzz5sofa<-rdrobust(x=d5sofa$hgb, y=d5sofa$death_hospice, c=7, fuzzy=d5sofa$tx, p=1, h=1)
+gc()
+fuzz6sofa<-rdrobust(x=d6sofa$hgb, y=d6sofa$death_hospice, c=7, fuzzy=d6sofa$tx, p=1, h=1)
+gc()
+fuzz7sofa<-rdrobust(x=d7sofa$hgb, y=d7sofa$death_hospice, c=7, fuzzy=d7sofa$tx, p=1, h=1)
+gc()
+
+
+rdd_outcome_fuzzysofa<-rbind(
+              rd_extraction(fuzz1sofa),
+              rd_extraction(fuzz2sofa),
+              rd_extraction(fuzz3sofa),
+              rd_extraction(fuzz4sofa),
+              rd_extraction(fuzz5sofa),
+              rd_extraction(fuzz6sofa),
+              rd_extraction(fuzz7sofa)) %>%
+    data.frame() %>%
+  setNames(row.names)
+
+View(rdd_outcome_fuzzysofa)
+
+
+fuzz1nsofa<-rdrobust(x=d1nsofa$hgb, y=d1nsofa$death_hospice, c=7, fuzzy=d1nsofa$tx, p=1, h=1)
+gc()
+fuzz2nsofa<-rdrobust(x=d2nsofa$hgb, y=d2nsofa$death_hospice, c=7, fuzzy=d2nsofa$tx, p=1, h=1)
+gc()
+fuzz3nsofa<-rdrobust(x=d3nsofa$hgb, y=d3nsofa$death_hospice, c=7, fuzzy=d3nsofa$tx, p=1, h=1)
+gc()
+fuzz4nsofa<-rdrobust(x=d4nsofa$hgb, y=d4nsofa$death_hospice, c=7, fuzzy=d4nsofa$tx, p=1, h=1)
+gc()
+fuzz5nsofa<-rdrobust(x=d5nsofa$hgb, y=d5nsofa$death_hospice, c=7, fuzzy=d5nsofa$tx, p=1, h=1)
+gc()
+fuzz6nsofa<-rdrobust(x=d6nsofa$hgb, y=d6nsofa$death_hospice, c=7, fuzzy=d6nsofa$tx, p=1, h=1)
+gc()
+fuzz7nsofa<-rdrobust(x=d7nsofa$hgb, y=d7nsofa$death_hospice, c=7, fuzzy=d7nsofa$tx, p=1, h=1)
+gc()
+
+
+rdd_outcome_fuzzynsofa<-rbind(
+              rd_extraction(fuzz1nsofa),
+              rd_extraction(fuzz2nsofa),
+              rd_extraction(fuzz3nsofa),
+              rd_extraction(fuzz4nsofa),
+              rd_extraction(fuzz5nsofa),
+              rd_extraction(fuzz6nsofa),
+              rd_extraction(fuzz7nsofa)) %>%
+    data.frame() %>%
+  setNames(row.names)
+
+View(rdd_outcome_fuzzynsofa)
+
+
+# ma_sofa
+ma_sofa<-metagen(TE=rdd_outcome_fuzzysofa$coef, seTE=rdd_outcome_fuzzysofa$se, sm="RD", comb.random=T, studlab=day)
+ma_sofa
+
+mr_sofa<-metareg(ma_sofa, ~day)
+mr_sofa
+
+# ma_nsofa
+ma_nsofa<-metagen(TE=rdd_outcome_fuzzynsofa$coef, seTE=rdd_outcome_fuzzynsofa$se, sm="RD", comb.random=T, studlab=day)
+ma_nsofa
+
+mr_nsofa<-metareg(ma_nsofa, ~day)
+mr_nsofa
+
+gc()
+
+
+
+# wbc
+d1wbc<-d1t %>% filter(wbcm==1 & !is.na(wbc))
+d2wbc<-d2t %>% filter(wbcm==1 & !is.na(wbc))
+d3wbc<-d3t %>% filter(wbcm==1 & !is.na(wbc))
+d4wbc<-d4t %>% filter(wbcm==1 & !is.na(wbc))
+d5wbc<-d5t %>% filter(wbcm==1 & !is.na(wbc))
+d5wbc<-d5t %>% filter(wbcm==1 & !is.na(wbc))
+d6wbc<-d6t %>% filter(wbcm==1 & !is.na(wbc))
+d7wbc<-d7t %>% filter(wbcm==1 & !is.na(wbc))
+
+d1nwbc<-d1t %>% filter(wbcm==0 & !is.na(wbc))
+d2nwbc<-d2t %>% filter(wbcm==0 & !is.na(wbc))
+d3nwbc<-d3t %>% filter(wbcm==0 & !is.na(wbc))
+d4nwbc<-d4t %>% filter(wbcm==0 & !is.na(wbc))
+d5nwbc<-d5t %>% filter(wbcm==0 & !is.na(wbc))
+d6nwbc<-d6t %>% filter(wbcm==0 & !is.na(wbc))
+d7nwbc<-d7t %>% filter(wbcm==0 & !is.na(wbc))
+
+fuzz1wbc<-rdrobust(x=d1wbc$hgb, y=d1wbc$death_hospice, c=7, fuzzy=d1wbc$tx, p=1, h=1)
+gc()
+fuzz2wbc<-rdrobust(x=d2wbc$hgb, y=d2wbc$death_hospice, c=7, fuzzy=d2wbc$tx, p=1, h=1)
+gc()
+fuzz3wbc<-rdrobust(x=d3wbc$hgb, y=d3wbc$death_hospice, c=7, fuzzy=d3wbc$tx, p=1, h=1)
+gc()
+fuzz4wbc<-rdrobust(x=d4wbc$hgb, y=d4wbc$death_hospice, c=7, fuzzy=d4wbc$tx, p=1, h=1)
+gc()
+fuzz5wbc<-rdrobust(x=d5wbc$hgb, y=d5wbc$death_hospice, c=7, fuzzy=d5wbc$tx, p=1, h=1)
+gc()
+fuzz6wbc<-rdrobust(x=d6wbc$hgb, y=d6wbc$death_hospice, c=7, fuzzy=d6wbc$tx, p=1, h=1)
+gc()
+fuzz7wbc<-rdrobust(x=d7wbc$hgb, y=d7wbc$death_hospice, c=7, fuzzy=d7wbc$tx, p=1, h=1)
+gc()
+
+
+rdd_outcome_fuzzywbc<-rbind(
+              rd_extraction(fuzz1wbc),
+              rd_extraction(fuzz2wbc),
+              rd_extraction(fuzz3wbc),
+              rd_extraction(fuzz4wbc),
+              rd_extraction(fuzz5wbc),
+              rd_extraction(fuzz6wbc),
+              rd_extraction(fuzz7wbc)) %>%
+    data.frame() %>%
+  setNames(row.names)
+
+View(rdd_outcome_fuzzywbc)
+
+
+fuzz1nwbc<-rdrobust(x=d1nwbc$hgb, y=d1nwbc$death_hospice, c=7, fuzzy=d1nwbc$tx, p=1, h=1)
+gc()
+fuzz2nwbc<-rdrobust(x=d2nwbc$hgb, y=d2nwbc$death_hospice, c=7, fuzzy=d2nwbc$tx, p=1, h=1)
+gc()
+fuzz3nwbc<-rdrobust(x=d3nwbc$hgb, y=d3nwbc$death_hospice, c=7, fuzzy=d3nwbc$tx, p=1, h=1)
+gc()
+fuzz4nwbc<-rdrobust(x=d4nwbc$hgb, y=d4nwbc$death_hospice, c=7, fuzzy=d4nwbc$tx, p=1, h=1)
+gc()
+fuzz5nwbc<-rdrobust(x=d5nwbc$hgb, y=d5nwbc$death_hospice, c=7, fuzzy=d5nwbc$tx, p=1, h=1)
+gc()
+fuzz6nwbc<-rdrobust(x=d6nwbc$hgb, y=d6nwbc$death_hospice, c=7, fuzzy=d6nwbc$tx, p=1, h=1)
+gc()
+fuzz7nwbc<-rdrobust(x=d7nwbc$hgb, y=d7nwbc$death_hospice, c=7, fuzzy=d7nwbc$tx, p=1, h=1)
+gc()
+
+
+rdd_outcome_fuzzynwbc<-rbind(
+              rd_extraction(fuzz1nwbc),
+              rd_extraction(fuzz2nwbc),
+              rd_extraction(fuzz3nwbc),
+              rd_extraction(fuzz4nwbc),
+              rd_extraction(fuzz5nwbc),
+              rd_extraction(fuzz6nwbc),
+              rd_extraction(fuzz7nwbc)) %>%
+    data.frame() %>%
+  setNames(row.names)
+
+View(rdd_outcome_fuzzynwbc)
+
+
+# ma_wbc
+ma_wbc<-metagen(TE=rdd_outcome_fuzzywbc$coef, seTE=rdd_outcome_fuzzywbc$se, sm="RD", comb.random=T, studlab=day)
+ma_wbc
+
+mr_wbc<-metareg(ma_wbc, ~day)
+mr_wbc
+
+# ma_nwbc
+ma_nwbc<-metagen(TE=rdd_outcome_fuzzynwbc$coef, seTE=rdd_outcome_fuzzynwbc$se, sm="RD", comb.random=T, studlab=day)
+ma_nwbc
+
+mr_nwbc<-metareg(ma_nwbc, ~day)
+mr_nwbc
+
+gc()
+
+
+
+# plt
+d1plt<-d1t %>% filter(pltm==1 & !is.na(plt))
+d2plt<-d2t %>% filter(pltm==1 & !is.na(plt))
+d3plt<-d3t %>% filter(pltm==1 & !is.na(plt))
+d4plt<-d4t %>% filter(pltm==1 & !is.na(plt))
+d5plt<-d5t %>% filter(pltm==1 & !is.na(plt))
+d5plt<-d5t %>% filter(pltm==1 & !is.na(plt))
+d6plt<-d6t %>% filter(pltm==1 & !is.na(plt))
+d7plt<-d7t %>% filter(pltm==1 & !is.na(plt))
+
+d1nplt<-d1t %>% filter(pltm==0 & !is.na(plt))
+d2nplt<-d2t %>% filter(pltm==0 & !is.na(plt))
+d3nplt<-d3t %>% filter(pltm==0 & !is.na(plt))
+d4nplt<-d4t %>% filter(pltm==0 & !is.na(plt))
+d5nplt<-d5t %>% filter(pltm==0 & !is.na(plt))
+d6nplt<-d6t %>% filter(pltm==0 & !is.na(plt))
+d7nplt<-d7t %>% filter(pltm==0 & !is.na(plt))
+
+fuzz1plt<-rdrobust(x=d1plt$hgb, y=d1plt$death_hospice, c=7, fuzzy=d1plt$tx, p=1, h=1)
+gc()
+fuzz2plt<-rdrobust(x=d2plt$hgb, y=d2plt$death_hospice, c=7, fuzzy=d2plt$tx, p=1, h=1)
+gc()
+fuzz3plt<-rdrobust(x=d3plt$hgb, y=d3plt$death_hospice, c=7, fuzzy=d3plt$tx, p=1, h=1)
+gc()
+fuzz4plt<-rdrobust(x=d4plt$hgb, y=d4plt$death_hospice, c=7, fuzzy=d4plt$tx, p=1, h=1)
+gc()
+fuzz5plt<-rdrobust(x=d5plt$hgb, y=d5plt$death_hospice, c=7, fuzzy=d5plt$tx, p=1, h=1)
+gc()
+fuzz6plt<-rdrobust(x=d6plt$hgb, y=d6plt$death_hospice, c=7, fuzzy=d6plt$tx, p=1, h=1)
+gc()
+fuzz7plt<-rdrobust(x=d7plt$hgb, y=d7plt$death_hospice, c=7, fuzzy=d7plt$tx, p=1, h=1)
+gc()
+
+
+rdd_outcome_fuzzyplt<-rbind(
+              rd_extraction(fuzz1plt),
+              rd_extraction(fuzz2plt),
+              rd_extraction(fuzz3plt),
+              rd_extraction(fuzz4plt),
+              rd_extraction(fuzz5plt),
+              rd_extraction(fuzz6plt),
+              rd_extraction(fuzz7plt)) %>%
+    data.frame() %>%
+  setNames(row.names)
+
+View(rdd_outcome_fuzzyplt)
+
+
+fuzz1nplt<-rdrobust(x=d1nplt$hgb, y=d1nplt$death_hospice, c=7, fuzzy=d1nplt$tx, p=1, h=1)
+gc()
+fuzz2nplt<-rdrobust(x=d2nplt$hgb, y=d2nplt$death_hospice, c=7, fuzzy=d2nplt$tx, p=1, h=1)
+gc()
+fuzz3nplt<-rdrobust(x=d3nplt$hgb, y=d3nplt$death_hospice, c=7, fuzzy=d3nplt$tx, p=1, h=1)
+gc()
+fuzz4nplt<-rdrobust(x=d4nplt$hgb, y=d4nplt$death_hospice, c=7, fuzzy=d4nplt$tx, p=1, h=1)
+gc()
+fuzz5nplt<-rdrobust(x=d5nplt$hgb, y=d5nplt$death_hospice, c=7, fuzzy=d5nplt$tx, p=1, h=1)
+gc()
+fuzz6nplt<-rdrobust(x=d6nplt$hgb, y=d6nplt$death_hospice, c=7, fuzzy=d6nplt$tx, p=1, h=1)
+gc()
+fuzz7nplt<-rdrobust(x=d7nplt$hgb, y=d7nplt$death_hospice, c=7, fuzzy=d7nplt$tx, p=1, h=1)
+gc()
+
+
+rdd_outcome_fuzzynplt<-rbind(
+              rd_extraction(fuzz1nplt),
+              rd_extraction(fuzz2nplt),
+              rd_extraction(fuzz3nplt),
+              rd_extraction(fuzz4nplt),
+              rd_extraction(fuzz5nplt),
+              rd_extraction(fuzz6nplt),
+              rd_extraction(fuzz7nplt)) %>%
+    data.frame() %>%
+  setNames(row.names)
+
+View(rdd_outcome_fuzzynplt)
+
+
+# ma_plt
+ma_plt<-metagen(TE=rdd_outcome_fuzzyplt$coef, seTE=rdd_outcome_fuzzyplt$se, sm="RD", comb.random=T, studlab=day)
+ma_plt
+
+mr_plt<-metareg(ma_plt, ~day)
+mr_plt
+
+# ma_nplt
+ma_nplt<-metagen(TE=rdd_outcome_fuzzynplt$coef, seTE=rdd_outcome_fuzzynplt$se, sm="RD", comb.random=T, studlab=day)
+ma_nplt
+
+mr_nplt<-metareg(ma_nplt, ~day)
+mr_nplt
+
+gc()
+
+```
+
+
+
+
+# exploratory analysis double meta regression
+```{r double meta regression}
+gc()
+
+# age65
+day_combined_name<-c("Day 1; AGE 65+", "Day 2; AGE 65+", "Day 3; AGE 65+", "Day 4; AGE 65+", "Day 5; AGE 65+", "Day 6; AGE 65+", "Day 7; AGE 65+", "Day 1; AGE <65", "Day 2; AGE <65", "Day 3; AGE <65", "Day 4; AGE <65", "Day 5; AGE <65", "Day 6; AGE <65", "Day 7; AGE <65")
+day_combined<-c(1,2,3,4,5,6,7,1,2,3,4,5,6,7)
+age65_combined<-c(1,1,1,1,1,1,1,0,0,0,0,0,0,0)
+
+age65_combined_explore2<-metagen(TE=c(rdd_outcome_fuzzyage65$coef, rdd_outcome_fuzzynage65$coef), seTE=c(rdd_outcome_fuzzyage65$se, rdd_outcome_fuzzynage65$se), sm="RD", comb.random=T, studlab=day_combined_name)
+prior_tx_combined_explore2
+
+age65_combined_explore2_day<-metareg(age65_combined_explore2, ~day_combined)
+age65_combined_explore2_day
+
+age65_combined_explore2_other<-metareg(age65_combined_explore2, ~age65_combined)
+age65_combined_explore2_other
+
+age65_combined_explore2_both<-metareg(age65_combined_explore2, ~age65_combined+day_combined)
+age65_combined_explore2_both
+
+gc()
+
+forest(age65_combined_explore2, layout = "JAMA",
+       comb.fixed=F,
+       )
+
+bubble(age65_combined_explore2_day, studlab=T, pos.studlab=2, offset=-0.2, ylim=c(-0.05, 0.05), xlab="Hospital day", ylab="Risk difference (Transfusion minus no transfusion)")
+bubble(age65_combined_explore2_other, studlab=T, pos.studlab=2, offset=-0.2, ylim=c(-0.05, 0.05), xlab="Hospital day", ylab="Risk difference (Transfusion minus no transfusion)")
+
+
+# fsex
+day_combined_name<-c("Day 1; Female sex", "Day 2; Female sex", "Day 3; Female sex", "Day 4; Female sex", "Day 5; Female sex", "Day 6; Female sex", "Day 7; Female sex", "Day 1; No Female sex", "Day 2; No Female sex", "Day 3; No Female sex", "Day 4; No Female sex", "Day 5; No Female sex", "Day 6; No Female sex", "Day 7; No Female sex")
+day_combined<-c(1,2,3,4,5,6,7,1,2,3,4,5,6,7)
+fsex_combined<-c(1,1,1,1,1,1,1,0,0,0,0,0,0,0)
+
+fsex_combined_explore2<-metagen(TE=c(rdd_outcome_fuzzyfsex$coef, rdd_outcome_fuzzynfsex$coef), seTE=c(rdd_outcome_fuzzyfsex$se, rdd_outcome_fuzzynfsex$se), sm="RD", comb.random=T, studlab=day_combined_name)
+prior_tx_combined_explore2
+
+fsex_combined_explore2_day<-metareg(fsex_combined_explore2, ~day_combined)
+fsex_combined_explore2_day
+
+fsex_combined_explore2_other<-metareg(fsex_combined_explore2, ~fsex_combined)
+fsex_combined_explore2_other
+
+fsex_combined_explore2_both<-metareg(fsex_combined_explore2, ~fsex_combined+day_combined)
+fsex_combined_explore2_both
+
+gc()
+
+forest(fsex_combined_explore2, layout = "JAMA",
+       comb.fixed=F,
+       )
+
+bubble(fsex_combined_explore2_day, studlab=T, pos.studlab=2, offset=-0.2, ylim=c(-0.05, 0.05), xlab="Hospital day", ylab="Risk difference (Transfusion minus no transfusion)")
+bubble(fsex_combined_explore2_other, studlab=T, pos.studlab=2, offset=-0.2, ylim=c(-0.05, 0.05), xlab="Hospital day", ylab="Risk difference (Transfusion minus no transfusion)")
+
+
+# icu
+day_combined_name<-c("Day 1; ICU", "Day 2; ICU", "Day 3; ICU", "Day 4; ICU", "Day 5; ICU", "Day 6; ICU", "Day 7; ICU", "Day 1; No ICU", "Day 2; No ICU", "Day 3; No ICU", "Day 4; No ICU", "Day 5; No ICU", "Day 6; No ICU", "Day 7; No ICU")
+day_combined<-c(1,2,3,4,5,6,7,1,2,3,4,5,6,7)
+icu_combined<-c(1,1,1,1,1,1,1,0,0,0,0,0,0,0)
+
+icu_combined_explore2<-metagen(TE=c(rdd_outcome_fuzzyicu$coef, rdd_outcome_fuzzynicu$coef), seTE=c(rdd_outcome_fuzzyicu$se, rdd_outcome_fuzzynicu$se), sm="RD", comb.random=T, studlab=day_combined_name)
+prior_tx_combined_explore2
+
+icu_combined_explore2_day<-metareg(icu_combined_explore2, ~day_combined)
+icu_combined_explore2_day
+
+icu_combined_explore2_other<-metareg(icu_combined_explore2, ~icu_combined)
+icu_combined_explore2_other
+
+icu_combined_explore2_both<-metareg(icu_combined_explore2, ~icu_combined+day_combined)
+icu_combined_explore2_both
+
+gc()
+
+forest(icu_combined_explore2, layout = "JAMA",
+       comb.fixed=F,
+       )
+
+bubble(icu_combined_explore2_day, studlab=T, pos.studlab=2, offset=-0.2, ylim=c(-0.05, 0.05), xlab="Hospital day", ylab="Risk difference (Transfusion minus no transfusion)")
+bubble(icu_combined_explore2_other, studlab=T, pos.studlab=2, offset=-0.2, ylim=c(-0.05, 0.05), xlab="Hospital day", ylab="Risk difference (Transfusion minus no transfusion)")
+
+
+gc()
+
+
+# sepsis
+day_combined_name<-c("Day 1; Sepsis POA", "Day 2; Sepsis POA", "Day 3; Sepsis POA", "Day 4; Sepsis POA", "Day 5; Sepsis POA", "Day 6; Sepsis POA", "Day 7; Sepsis POA", "Day 1; No Sepsis POA", "Day 2; No Sepsis POA", "Day 3; No Sepsis POA", "Day 4; No Sepsis POA", "Day 5; No Sepsis POA", "Day 6; No Sepsis POA", "Day 7; No Sepsis POA")
+day_combined<-c(1,2,3,4,5,6,7,1,2,3,4,5,6,7)
+sepsis_combined<-c(1,1,1,1,1,1,1,0,0,0,0,0,0,0)
+
+sepsis_combined_explore2<-metagen(TE=c(rdd_outcome_fuzzysepsis$coef, rdd_outcome_fuzzynsepsis$coef), seTE=c(rdd_outcome_fuzzysepsis$se, rdd_outcome_fuzzynsepsis$se), sm="RD", comb.random=T, studlab=day_combined_name)
+prior_tx_combined_explore2
+
+sepsis_combined_explore2_day<-metareg(sepsis_combined_explore2, ~day_combined)
+sepsis_combined_explore2_day
+
+sepsis_combined_explore2_other<-metareg(sepsis_combined_explore2, ~sepsis_combined)
+sepsis_combined_explore2_other
+
+sepsis_combined_explore2_both<-metareg(sepsis_combined_explore2, ~sepsis_combined+day_combined)
+sepsis_combined_explore2_both
+
+gc()
+
+forest(sepsis_combined_explore2, layout = "JAMA",
+       comb.fixed=F,
+       )
+
+bubble(sepsis_combined_explore2_day, studlab=T, pos.studlab=2, offset=-0.2, ylim=c(-0.05, 0.05), xlab="Hospital day", ylab="Risk difference (Transfusion minus no transfusion)")
+bubble(sepsis_combined_explore2_other, studlab=T, pos.studlab=2, offset=-0.2, ylim=c(-0.05, 0.05), xlab="Hospital day", ylab="Risk difference (Transfusion minus no transfusion)")
+
+
+# posthemorrhagic_anemia
+day_combined_name<-c("Day 1; Blood loss anemia", "Day 2; Blood loss anemia", "Day 3; Blood loss anemia", "Day 4; Blood loss anemia", "Day 5; Blood loss anemia", "Day 6; Blood loss anemia", "Day 7; Blood loss anemia", "Day 1; No Blood loss anemia", "Day 2; No Blood loss anemia", "Day 3; No Blood loss anemia", "Day 4; No Blood loss anemia", "Day 5; No Blood loss anemia", "Day 6; No Blood loss anemia", "Day 7; No Blood loss anemia")
+day_combined<-c(1,2,3,4,5,6,7,1,2,3,4,5,6,7)
+posthemorrhagic_anemia_combined<-c(1,1,1,1,1,1,1,0,0,0,0,0,0,0)
+
+posthemorrhagic_anemia_combined_explore2<-metagen(TE=c(rdd_outcome_fuzzyposthemorrhagic_anemia$coef, rdd_outcome_fuzzynposthemorrhagic_anemia$coef), seTE=c(rdd_outcome_fuzzyposthemorrhagic_anemia$se, rdd_outcome_fuzzynposthemorrhagic_anemia$se), sm="RD", comb.random=T, studlab=day_combined_name)
+prior_tx_combined_explore2
+
+posthemorrhagic_anemia_combined_explore2_day<-metareg(posthemorrhagic_anemia_combined_explore2, ~day_combined)
+posthemorrhagic_anemia_combined_explore2_day
+
+posthemorrhagic_anemia_combined_explore2_other<-metareg(posthemorrhagic_anemia_combined_explore2, ~posthemorrhagic_anemia_combined)
+posthemorrhagic_anemia_combined_explore2_other
+
+posthemorrhagic_anemia_combined_explore2_both<-metareg(posthemorrhagic_anemia_combined_explore2, ~posthemorrhagic_anemia_combined+day_combined)
+posthemorrhagic_anemia_combined_explore2_both
+
+gc()
+
+forest(posthemorrhagic_anemia_combined_explore2, layout = "JAMA",
+       comb.fixed=F,
+       )
+
+bubble(posthemorrhagic_anemia_combined_explore2_day, studlab=T, pos.studlab=2, offset=-0.2, ylim=c(-0.05, 0.05), xlab="Hospital day", ylab="Risk difference (Transfusion minus no transfusion)")
+bubble(posthemorrhagic_anemia_combined_explore2_other, studlab=T, pos.studlab=2, offset=-0.2, ylim=c(-0.05, 0.05), xlab="Hospital day", ylab="Risk difference (Transfusion minus no transfusion)")
+
+
+# circulatory_system
+day_combined_name<-c("Day 1; AMI", "Day 2; AMI", "Day 3; AMI", "Day 4; AMI", "Day 5; AMI", "Day 6; AMI", "Day 7; AMI", "Day 1; No AMI", "Day 2; No AMI", "Day 3; No AMI", "Day 4; No AMI", "Day 5; No AMI", "Day 6; No AMI", "Day 7; No AMI")
+day_combined<-c(1,2,3,4,5,6,7,1,2,3,4,5,6,7)
+circulatory_system_combined<-c(1,1,1,1,1,1,1,0,0,0,0,0,0,0)
+
+circulatory_system_combined_explore2<-metagen(TE=c(rdd_outcome_fuzzycirculatory_system$coef, rdd_outcome_fuzzyncirculatory_system$coef), seTE=c(rdd_outcome_fuzzycirculatory_system$se, rdd_outcome_fuzzyncirculatory_system$se), sm="RD", comb.random=T, studlab=day_combined_name)
+prior_tx_combined_explore2
+
+circulatory_system_combined_explore2_day<-metareg(circulatory_system_combined_explore2, ~day_combined)
+circulatory_system_combined_explore2_day
+
+circulatory_system_combined_explore2_other<-metareg(circulatory_system_combined_explore2, ~circulatory_system_combined)
+circulatory_system_combined_explore2_other
+
+circulatory_system_combined_explore2_both<-metareg(circulatory_system_combined_explore2, ~circulatory_system_combined+day_combined)
+circulatory_system_combined_explore2_both
+
+gc()
+
+forest(circulatory_system_combined_explore2, layout = "JAMA",
+       comb.fixed=F,
+       )
+
+bubble(circulatory_system_combined_explore2_day, studlab=T, pos.studlab=2, offset=-0.2, ylim=c(-0.05, 0.05), xlab="Hospital day", ylab="Risk difference (Transfusion minus no transfusion)")
+bubble(circulatory_system_combined_explore2_other, studlab=T, pos.studlab=2, offset=-0.2, ylim=c(-0.05, 0.05), xlab="Hospital day", ylab="Risk difference (Transfusion minus no transfusion)")
+
+
+# surgery
+day_combined_name<-c("Day 1; Surgery", "Day 2; Surgery", "Day 3; Surgery", "Day 4; Surgery", "Day 5; Surgery", "Day 6; Surgery", "Day 7; Surgery", "Day 1; No Surgery", "Day 2; No Surgery", "Day 3; No Surgery", "Day 4; No Surgery", "Day 5; No Surgery", "Day 6; No Surgery", "Day 7; No Surgery")
+day_combined<-c(1,2,3,4,5,6,7,1,2,3,4,5,6,7)
+surgery_combined<-c(1,1,1,1,1,1,1,0,0,0,0,0,0,0)
+
+surgery_combined_explore2<-metagen(TE=c(rdd_outcome_fuzzysurgery$coef, rdd_outcome_fuzzynsurgery$coef), seTE=c(rdd_outcome_fuzzysurgery$se, rdd_outcome_fuzzynsurgery$se), sm="RD", comb.random=T, studlab=day_combined_name)
+prior_tx_combined_explore2
+
+surgery_combined_explore2_day<-metareg(surgery_combined_explore2, ~day_combined)
+surgery_combined_explore2_day
+
+surgery_combined_explore2_other<-metareg(surgery_combined_explore2, ~surgery_combined)
+surgery_combined_explore2_other
+
+surgery_combined_explore2_both<-metareg(surgery_combined_explore2, ~surgery_combined+day_combined)
+surgery_combined_explore2_both
+
+gc()
+
+forest(surgery_combined_explore2, layout = "JAMA",
+       comb.fixed=F,
+       )
+
+bubble(surgery_combined_explore2_day, studlab=T, pos.studlab=2, offset=-0.2, ylim=c(-0.05, 0.05), xlab="Hospital day", ylab="Risk difference (Transfusion minus no transfusion)")
+bubble(surgery_combined_explore2_other, studlab=T, pos.studlab=2, offset=-0.2, ylim=c(-0.05, 0.05), xlab="Hospital day", ylab="Risk difference (Transfusion minus no transfusion)")
+
+
+# sofa
+day_combined_name<-c("Day 1; SOFA 2+", "Day 2; SOFA 2+", "Day 3; SOFA 2+", "Day 4; SOFA 2+", "Day 5; SOFA 2+", "Day 6; SOFA 2+", "Day 7; SOFA 2+", "Day 1; SOFA <2", "Day 2; SOFA <2", "Day 3; SOFA <2", "Day 4; SOFA <2", "Day 5; SOFA <2", "Day 6; SOFA <2", "Day 7; SOFA <2")
+day_combined<-c(1,2,3,4,5,6,7,1,2,3,4,5,6,7)
+sofa_combined<-c(1,1,1,1,1,1,1,0,0,0,0,0,0,0)
+
+sofa_combined_explore2<-metagen(TE=c(rdd_outcome_fuzzysofa$coef, rdd_outcome_fuzzynsofa$coef), seTE=c(rdd_outcome_fuzzysofa$se, rdd_outcome_fuzzynsofa$se), sm="RD", comb.random=T, studlab=day_combined_name)
+prior_tx_combined_explore2
+
+sofa_combined_explore2_day<-metareg(sofa_combined_explore2, ~day_combined)
+sofa_combined_explore2_day
+
+sofa_combined_explore2_other<-metareg(sofa_combined_explore2, ~sofa_combined)
+sofa_combined_explore2_other
+
+sofa_combined_explore2_both<-metareg(sofa_combined_explore2, ~sofa_combined+day_combined)
+sofa_combined_explore2_both
+
+gc()
+
+forest(sofa_combined_explore2, layout = "JAMA",
+       comb.fixed=F,
+       )
+
+bubble(sofa_combined_explore2_day, studlab=T, pos.studlab=2, offset=-0.2, ylim=c(-0.05, 0.05), xlab="Hospital day", ylab="Risk difference (Transfusion minus no transfusion)")
+bubble(sofa_combined_explore2_other, studlab=T, pos.studlab=2, offset=-0.2, ylim=c(-0.05, 0.05), xlab="Hospital day", ylab="Risk difference (Transfusion minus no transfusion)")
+
+
+# wbc
+day_combined_name<-c("Day 1; WBC 8.5+", "Day 2; WBC 8.5+", "Day 3; WBC 8.5+", "Day 4; WBC 8.5+", "Day 5; WBC 8.5+", "Day 6; WBC 8.5+", "Day 7; WBC 8.5+", "Day 1; WBC <8.5", "Day 2; WBC <8.5", "Day 3; WBC <8.5", "Day 4; WBC <8.5", "Day 5; WBC <8.5", "Day 6; WBC <8.5", "Day 7; WBC <8.5")
+day_combined<-c(1,2,3,4,5,6,7,1,2,3,4,5,6,7)
+wbc_combined<-c(1,1,1,1,1,1,1,0,0,0,0,0,0,0)
+
+wbc_combined_explore2<-metagen(TE=c(rdd_outcome_fuzzywbc$coef, rdd_outcome_fuzzynwbc$coef), seTE=c(rdd_outcome_fuzzywbc$se, rdd_outcome_fuzzynwbc$se), sm="RD", comb.random=T, studlab=day_combined_name)
+prior_tx_combined_explore2
+
+wbc_combined_explore2_day<-metareg(wbc_combined_explore2, ~day_combined)
+wbc_combined_explore2_day
+
+wbc_combined_explore2_other<-metareg(wbc_combined_explore2, ~wbc_combined)
+wbc_combined_explore2_other
+
+wbc_combined_explore2_both<-metareg(wbc_combined_explore2, ~wbc_combined+day_combined)
+wbc_combined_explore2_both
+
+gc()
+
+forest(wbc_combined_explore2, layout = "JAMA",
+       comb.fixed=F,
+       )
+
+bubble(wbc_combined_explore2_day, studlab=T, pos.studlab=2, offset=-0.2, ylim=c(-0.05, 0.05), xlab="Hospital day", ylab="Risk difference (Transfusion minus no transfusion)")
+bubble(wbc_combined_explore2_other, studlab=T, pos.studlab=2, offset=-0.2, ylim=c(-0.05, 0.05), xlab="Hospital day", ylab="Risk difference (Transfusion minus no transfusion)")
+
+
+# plt
+day_combined_name<-c("Day 1; PLT 191+", "Day 2; PLT 191+", "Day 3; PLT 191+", "Day 4; PLT 191+", "Day 5; PLT 191+", "Day 6; PLT 191+", "Day 7; PLT 191+", "Day 1; PLT <191", "Day 2; PLT <191", "Day 3; PLT <191", "Day 4; PLT <191", "Day 5; PLT <191", "Day 6; PLT <191", "Day 7; PLT <191")
+day_combined<-c(1,2,3,4,5,6,7,1,2,3,4,5,6,7)
+plt_combined<-c(1,1,1,1,1,1,1,0,0,0,0,0,0,0)
+
+plt_combined_explore2<-metagen(TE=c(rdd_outcome_fuzzyplt$coef, rdd_outcome_fuzzynplt$coef), seTE=c(rdd_outcome_fuzzyplt$se, rdd_outcome_fuzzynplt$se), sm="RD", comb.random=T, studlab=day_combined_name)
+prior_tx_combined_explore2
+
+plt_combined_explore2_day<-metareg(plt_combined_explore2, ~day_combined)
+plt_combined_explore2_day
+
+plt_combined_explore2_other<-metareg(plt_combined_explore2, ~plt_combined)
+plt_combined_explore2_other
+
+plt_combined_explore2_both<-metareg(plt_combined_explore2, ~plt_combined+day_combined)
+plt_combined_explore2_both
+
+gc()
+
+forest(plt_combined_explore2, layout = "JAMA",
+       comb.fixed=F,
+       )
+
+bubble(plt_combined_explore2_day, studlab=T, pos.studlab=2, offset=-0.2, ylim=c(-0.05, 0.05), xlab="Hospital day", ylab="Risk difference (Transfusion minus no transfusion)")
+bubble(plt_combined_explore2_other, studlab=T, pos.studlab=2, offset=-0.2, ylim=c(-0.05, 0.05), xlab="Hospital day", ylab="Risk difference (Transfusion minus no transfusion)")
+
+
+
+# mcv
+day_combined_name<-c("Day 1; MCV 89.8+", "Day 2; MCV 89.8+", "Day 3; MCV 89.8+", "Day 4; MCV 89.8+", "Day 5; MCV 89.8+", "Day 6; MCV 89.8+", "Day 7; MCV 89.8+", "Day 1; MCV <89.8", "Day 2; MCV <89.8", "Day 3; MCV <89.8", "Day 4; MCV <89.8", "Day 5; MCV <89.8", "Day 6; MCV <89.8", "Day 7; MCV <89.8")
+day_combined<-c(1,2,3,4,5,6,7,1,2,3,4,5,6,7)
+mcv_combined<-c(1,1,1,1,1,1,1,0,0,0,0,0,0,0)
+
+mcv_combined_explore2<-metagen(TE=c(rdd_outcome_fuzzymcv$coef, rdd_outcome_fuzzynmcv$coef), seTE=c(rdd_outcome_fuzzymcv$se, rdd_outcome_fuzzynmcv$se), sm="RD", comb.random=T, studlab=day_combined_name)
+prior_tx_combined_explore2
+
+mcv_combined_explore2_day<-metareg(mcv_combined_explore2, ~day_combined)
+mcv_combined_explore2_day
+
+mcv_combined_explore2_other<-metareg(mcv_combined_explore2, ~mcv_combined)
+mcv_combined_explore2_other
+
+mcv_combined_explore2_both<-metareg(mcv_combined_explore2, ~mcv_combined+day_combined)
+mcv_combined_explore2_both
+
+gc()
+
+forest(mcv_combined_explore2, layout = "JAMA",
+       comb.fixed=F,
+       )
+
+bubble(mcv_combined_explore2_day, studlab=T, pos.studlab=2, offset=-0.2, ylim=c(-0.05, 0.05), xlab="Hospital day", ylab="Risk difference (Transfusion minus no transfusion)")
+bubble(mcv_combined_explore2_other, studlab=T, pos.studlab=2, offset=-0.2, ylim=c(-0.05, 0.05), xlab="Hospital day", ylab="Risk difference (Transfusion minus no transfusion)")
+
+
+# rdw
+day_combined_name<-c("Day 1; RDW 17.3+", "Day 2; RDW 17.3+", "Day 3; RDW 17.3+", "Day 4; RDW 17.3+", "Day 5; RDW 17.3+", "Day 6; RDW 17.3+", "Day 7; RDW 17.3+", "Day 1; RDW <17.3", "Day 2; RDW <17.3", "Day 3; RDW <17.3", "Day 4; RDW <17.3", "Day 5; RDW <17.3", "Day 6; RDW <17.3", "Day 7; RDW <17.3")
+day_combined<-c(1,2,3,4,5,6,7,1,2,3,4,5,6,7)
+rdw_combined<-c(1,1,1,1,1,1,1,0,0,0,0,0,0,0)
+
+rdw_combined_explore2<-metagen(TE=c(rdd_outcome_fuzzyrdw$coef, rdd_outcome_fuzzynrdw$coef), seTE=c(rdd_outcome_fuzzyrdw$se, rdd_outcome_fuzzynrdw$se), sm="RD", comb.random=T, studlab=day_combined_name)
+prior_tx_combined_explore2
+
+rdw_combined_explore2_day<-metareg(rdw_combined_explore2, ~day_combined)
+rdw_combined_explore2_day
+
+rdw_combined_explore2_other<-metareg(rdw_combined_explore2, ~rdw_combined)
+rdw_combined_explore2_other
+
+rdw_combined_explore2_both<-metareg(rdw_combined_explore2, ~rdw_combined+day_combined)
+rdw_combined_explore2_both
+
+gc()
+
+forest(rdw_combined_explore2, layout = "JAMA",
+       comb.fixed=F,
+       )
+
+bubble(rdw_combined_explore2_day, studlab=T, pos.studlab=2, offset=-0.2, ylim=c(-0.05, 0.05), xlab="Hospital day", ylab="Risk difference (Transfusion minus no transfusion)")
+bubble(rdw_combined_explore2_other, studlab=T, pos.studlab=2, offset=-0.2, ylim=c(-0.05, 0.05), xlab="Hospital day", ylab="Risk difference (Transfusion minus no transfusion)")
+
+
+# prior_tx
+day_combined_name<-c("Day 2; Prior transfusion", "Day 3; Prior transfusion", "Day 4; Prior transfusion", "Day 5; Prior transfusion", "Day 6; Prior transfusion", "Day 7; Prior transfusion", "Day 1; No prior transfusion", "Day 2; No prior transfusion", "Day 3; No prior transfusion", "Day 4; No prior transfusion", "Day 5; No prior transfusion", "Day 6; No prior transfusion", "Day 7; No prior transfusion")
+day_combined<-c(2,3,4,5,6,7,1,2,3,4,5,6,7)
+prior_tx_combined<-c(1,1,1,1,1,1,0,0,0,0,0,0,0)
+
+prior_tx_combined_explore2<-metagen(TE=c(rdd_outcome_fuzzyprior_tx$coef, rdd_outcome_fuzzynprior_tx$coef), seTE=c(rdd_outcome_fuzzyprior_tx$se, rdd_outcome_fuzzynprior_tx$se), sm="RD", comb.random=T, studlab=day_combined_name)
+prior_tx_combined_explore2
+
+prior_tx_combined_explore2_day<-metareg(prior_tx_combined_explore2, ~day_combined)
+prior_tx_combined_explore2_day
+
+prior_tx_combined_explore2_other<-metareg(prior_tx_combined_explore2, ~prior_tx_combined)
+prior_tx_combined_explore2_other
+
+prior_tx_combined_explore2_both<-metareg(prior_tx_combined_explore2, ~prior_tx_combined+day_combined)
+prior_tx_combined_explore2_both
+
+gc()
+
+forest(prior_tx_combined_explore2, layout = "JAMA",
+       comb.fixed=F,
+       )
+
+bubble(prior_tx_combined_explore2_day, studlab=T, pos.studlab=2, offset=-0.2, ylim=c(-0.05, 0.05), xlab="Hospital day", ylab="Risk difference (Transfusion minus no transfusion)")
+bubble(prior_tx_combined_explore2_other, studlab=T, pos.studlab=2, offset=-0.2, ylim=c(-0.05, 0.05), xlab="Hospital day", ylab="Risk difference (Transfusion minus no transfusion)")
+
+```
+
+
+
 
