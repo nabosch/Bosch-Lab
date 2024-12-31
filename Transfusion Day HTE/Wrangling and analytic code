@@ -1,5 +1,5 @@
 ---
-title: "hgb ite"
+title: "hgb hte by calendar day"
 output:
   word_document: default
   html_document: default
@@ -24,26 +24,10 @@ library(ivreg)
 library(tmle)
 library(meta)
 
-interactionp <- function(e1, l1, h1, e2, l2, h2) {
-  d <- (e1-e2)
-  se1<-(h1-l1)/3.92
-  se2<-(h2-l2)/3.92
-  sed<-sqrt((se1^2)+(se2^2))
-  z<-d/sed
-  p<-2*pnorm(abs(z), lower.tail = F)
-  print(z)
-  print(round(p,2))
-}
-
 
 # function to extract rd output (conventional; not bias corrected or robust)
 rd_extraction<-function(x){
   y<-c(x$coef[1]*100, x$ci[1,]*100, x$pv[1], x$N, x$coef[1], x$se[1])
-  return(y)
-}
-
-rd_extraction_auto<-function(x){
-  y<-c(x$coef[3]*100, x$ci[3,]*100, x$pv[3], x$N, x$coef[3], x$se[3])
   return(y)
 }
 
@@ -314,7 +298,8 @@ m5<-m4 %>%
   mutate(major_surgery_on_or_before_hgb_day=if_else(!is.na(major_surgery_on_or_before_hgb_day) & major_surgery_on_or_before_hgb_day==1,1,0),
          posthemorrhagic_anemia=if_else(!is.na(posthemorrhagic_anemia) & posthemorrhagic_anemia==1,1,0),
          ami=if_else(!is.na(ami) & ami==1,1,0),
-         brain_injury=if_else(!is.na(brain_injury) & brain_injury==1,1,0))
+         brain_injury=if_else(!is.na(brain_injury) & brain_injury==1,1,0),
+         diuretic_on_day=if_else(!is.na(diuretic_on_day) & diuretic_on_day==1,1,0))
 gc()
 
 nrow(m5)
@@ -365,14 +350,13 @@ nrow(m6)
 nrow(m6 %>% group_by(PAT_KEY) %>% slice(1L))
 nrow(m6 %>% group_by(MEDREC_KEY) %>% slice(1L))
 
-fwrite(m6, "hgb_ite-12-12-2024.csv")
+fwrite(m6, "hgb_ite-12-17-2024.csv")
 gc()
-m6<-fread("hgb_ite-12-12-2024.csv")
+m6<-fread("hgb_ite-12-17-2024.csv")
 gc()
 
 
 
-gc()
 
 ```
 
@@ -402,11 +386,129 @@ sofa1<-sofa %>%
 
 gc()
 
-summary(sofa1)
+m7<-m6 %>%
+  left_join(sofa1)
+
+rm(sofa)
+rm(sofa1)
+
+gc()
+
+
+# adding weight
+kg<-fread("/projectnb/walkelab/Vitals/cleaned_weight_to_kg.csv.gz", sep=",")
+
+gc()
+
+kg1<-kg %>%
+  filter(OBSERVATION_DAY_NUMBER>=1 & OBSERVATION_DAY_NUMBER<=7) %>%
+  select(PAT_KEY, hgb_day=OBSERVATION_DAY_NUMBER, kg=cleaned_weight) %>%
+  group_by(PAT_KEY, hgb_day) %>%
+  summarize(kg=median(kg))
+
+gc()
+
+kg_day1<-kg1 %>%
+  filter(hgb_day==1) %>%
+  group_by(PAT_KEY) %>%
+  summarize(kg_day1=max(kg))
+
+rm(kg)  
+
+gc()
+
+m8<-m7 %>%
+  left_join(kg1) %>%
+  left_join(kg_day1)
+
+rm(kg1)
+rm(kg_day1)
+
+gc()
+
+# fluids
+project_raw_data<-list.files(path="/projectnb/walkelab/PINC AI 2016-2022", full.names=T) %>%
+    sort()
+
+bill_path<-project_raw_data[project_raw_data %like% "patbill"]
+
+bill_lu<-fread("/projectnb/walkelab/PINC AI 2016-2022/bu_chgmstr.txt.gz", sep="|")
+
+fluids_lu<- bill_lu %>%
+  filter(STD_CHG_DESC %in% c("LACTATED RINGERS 1000ML","LACTATED RINGERS 500ML", "RINGERS 1000ML","RINGERS 500ML", "0.9% NACL 1000ML","0.9% NACL 500ML","0.9% NACL+KCL 20MEQ 1000ML","0.9% NACL+KCL 40MEQ 1000ML")) %>%
+  mutate(balanced=if_else(STD_CHG_DESC %in% c("ISOLYTE S 1000ML","LACTATED RINGERS 1000ML","LACTATED RINGERS 500ML","NORMOSAL-R 7.4% 1000ML","NORMOSAL-R 7.4% 500ML","PLASMALYTE 148 1000ML","PLASMALYTE 148 500ML","PLASMALYTE A PH7.4 1000ML","PLASMALYTE A PH7.4 500ML","RINGERS 1000ML","RINGERS 500ML", "PLASMALYTE R 1000ML"),1,0),
+         unbalanced=if_else(STD_CHG_DESC %in% c("0.9% NACL 1000ML","0.9% NACL 500ML","0.9% NACL+KCL 20MEQ 1000ML","0.9% NACL+KCL 40MEQ 1000ML"),1,0)) %>%
+  mutate(fluid_volume=if_else(STD_CHG_DESC %like% "1000",1000,500)) %>%
+  select(STD_CHG_CODE, STD_CHG_DESC, fluid_volume)
+
+fluid_function <- function(x){
+  y<-fread(x, sep="|", showProgress = FALSE) %>%
+    filter(SERV_DAY>=1 & SERV_DAY<=7  & STD_QTY>=1 & STD_QTY<=20) %>%
+    inner_join(fluids_lu) %>%
+    mutate(fluid_volume=fluid_volume*STD_QTY) %>%
+    group_by(PAT_KEY, SERV_DAY) %>%
+    summarise(fluid_volume=sum(fluid_volume)) %>%
+    filter(fluid_volume>=500 & fluid_volume<=10000) %>%
+    group_by(PAT_KEY) %>%
+    arrange(SERV_DAY, .by_group=T) %>%
+    mutate(cumulative_fluid_volume=cumsum(fluid_volume)) %>%
+    select(PAT_KEY, hgb_day=SERV_DAY, fluid_volume, cumulative_fluid_volume)
+  gc()
+  return(y)
+}
+
+fluid<-lapply(bill_path, fluid_function)
+gc()
+fluid<-do.call("rbind", fluid)
+gc()
+
+m9<-m8 %>%
+  left_join(fluid)
+
+gc()
+
+m9$fluid_volume[is.na(m9$fluid_volume)]<-0
+
+gc()
+
+m10<-m9 %>%
+  group_by(PAT_KEY) %>%
+  arrange(hgb_day, .by_group=T) %>%
+  mutate(cumulative_fluid_volume2=na.locf(cumulative_fluid_volume, na.rm=F))
+
+gc()
+
+m10$cumulative_fluid_volume2[is.na(m10$cumulative_fluid_volume2)]<-0
+
+gc()
+
+# diuretic_on_day
+diuretic_lu<-bill_lu %>%
+  filter(PROD_NAME_METH_DESC %in% c("BUMETANIDE PARENTERAL", "FUROSEMIDE PARENTERAL", "TORSEMIDE PARENTERAL")) %>%
+  mutate(diuretic_on_day=1)
+
+diuretic_on_day_function <- function(x){
+  y<-fread(x, sep="|", showProgress = FALSE) %>%
+    filter(SERV_DAY>=1 & SERV_DAY<=7) %>%
+    inner_join(diuretic_lu) %>%
+    group_by(PAT_KEY, SERV_DAY) %>%
+    summarise(diuretic_on_day=max(diuretic_on_day)) %>%
+    select(PAT_KEY, hgb_day=SERV_DAY, diuretic_on_day)
+  gc()
+  return(y)
+}
+
+diuretic_on_day<-lapply(bill_path, diuretic_on_day_function)
+gc()
+diuretic_on_day<-do.call("rbind", diuretic_on_day)
+gc()
+
+m11<-m10 %>%
+  left_join(diuretic_on_day) %>%
+  mutate(diuretic_on_day=if_else(!is.na(diuretic_on_day) & diuretic_on_day==1,1,0))
 
 # removing hgb of exactly 7.0 and addint other synthetic variables like top diagnoses (still need to do) and ACS
-t<-m6 %>%
-  left_join(sofa1) %>%
+t<-m11 %>%
   filter(hgb!=7.0) %>%
   mutate(fsex=if_else(GENDER=="F",1,0),
          death_hospice=if_else(DISC_STATUS %in% c(20,50,51),1,0),
@@ -420,8 +522,17 @@ t<-m6 %>%
          acute_kidney_failure=if_else(primary_diagnosis=="N17.9",1,0),
          nstemi=if_else(primary_diagnosis=="I21.4",1,0))
 
+gc()
+
 t$msofa_totali[is.na(t$msofa_totali)]<-0
 
+t$kg_diff<-t$kg_day1-t$kg
+
+gc()
+
+fwrite(t, "hgb_ite_t-12-17-2024.csv")
+gc()
+t<-fread("hgb_ite_t-12-17-2024.csv")
 gc()
 
 
@@ -431,18 +542,17 @@ nrow(t %>% group_by(MEDREC_KEY) %>% slice(1L))
 
 gc()
 
-
+colnames(t1)
 ```
 
 
 # table 1
 ```{r table 1}
-# need to add top diagnoses and check normality of cbc indices
-myVars<-c("AGE", "GENDER", "icu_on_day", "gagne_combined_poa", "angus_sepsis_poa", "ami", "sepsis_unspecified_organism", "covid", "htn_heart_kidney_chf", "nstemi", "major_surgery_on_or_before_hgb_day", "posthemorrhagic_anemia", "hgb", "crit","mchc", "mcv", "rdw", "plt", "wbc",  "tx_before", "msofa_totali")
+myVars<-c("AGE", "GENDER", "icu_on_day", "gagne_combined_poa", "angus_sepsis_poa", "ami", "sepsis_unspecified_organism", "covid", "htn_heart_kidney_chf", "nstemi", "major_surgery_on_or_before_hgb_day", "posthemorrhagic_anemia", "brain_injury", "hgb", "crit","mchc", "mcv", "rdw", "plt", "wbc",  "tx_before", "msofa_totali", "diuretic_on_day", "kg_diff", "cumulative_fluid_volume2")
 
-catVars<-c("GENDER", "icu_on_day", "angus_sepsis_poa", "ami", "tx_before", "sepsis_unspecified_organism", "covid", "htn_heart_kidney_chf", "nstemi", "major_surgery_on_or_before_hgb_day", "posthemorrhagic_anemia")
+catVars<-c("GENDER", "icu_on_day", "angus_sepsis_poa", "ami", "tx_before", "sepsis_unspecified_organism", "covid", "htn_heart_kidney_chf", "nstemi", "major_surgery_on_or_before_hgb_day", "posthemorrhagic_anemia", "brain_injury", "diuretic_on_day")
 
-nonnormVars<-c("AGE", "gagne_combined_poa", "hgb", "crit", "mchc", "mcv", "rdw", "plt", "wbc", "msofa_totali")
+nonnormVars<-c("AGE", "gagne_combined_poa", "hgb", "crit", "mchc", "mcv", "rdw", "plt", "wbc", "msofa_totali", "cumulative_fluid_volume2")
 
 tabd <- CreateTableOne(vars = myVars, data = t, factorVars = catVars, test=F, strata="hgb_day", addOverall=TRUE)
 print(tabd, missing=T, nonnormal = nonnormVars, smd=T)
@@ -490,14 +600,25 @@ t1$msofa_totalim[t1$msofa_totali>=msofa_totalim]<-1
 
 gc()
 
+kg_diffm<-median(t1$kg_diff, na.rm=T)
+t1$kg_diffm<-0
+t1$kg_diffm[t1$kg_diff>=kg_diffm]<-1
+
+gc()
+
+cumulative_fluid_volume2m<-median(t1$cumulative_fluid_volume2, na.rm=T)
+t1$cumulative_fluid_volume2m<-0
+t1$cumulative_fluid_volume2m[t1$cumulative_fluid_volume2>=cumulative_fluid_volume2m]<-1
+
+gc()
 
 nrow(t1)
 nrow(t1 %>% group_by(PAT_KEY) %>% slice(1L))
 nrow(t1 %>% group_by(MEDREC_KEY) %>% slice(1L))
 
-
 tabd1 <- CreateTableOne(vars = myVars, data = t1, factorVars = catVars, test=F, strata="hgb_day", addOverall=F)
 print_tabd1<-print(tabd1, missing=T, nonnormal = nonnormVars, smd=T)
+print(tabd1, missing=T, nonnormal = nonnormVars, smd=T)
 write.csv(print_tabd1, file = "myTable.csv")
 
 # main diagnoses count
@@ -595,6 +716,7 @@ by_day2<-t1 %>%
             deathp=sum(death)/sum(count))
 
 View(by_day2)
+
 
 ```
 
@@ -972,6 +1094,11 @@ mr_fuzzyh2
 
 
 # automatic bandwidths
+rd_extraction_auto<-function(x){
+  y<-c(x$coef[3]*100, x$ci[3,]*100, x$pv[3], x$N, x$coef[3], x$se[3])
+  return(y)
+}
+
 ma_fuzzyauto<-metagen(TE=rdd_outcome_fuzzyauto$coef, seTE=rdd_outcome_fuzzyauto$se, sm="RD", comb.random=T, studlab=day)
 ma_fuzzyauto
 
@@ -2409,6 +2536,276 @@ mr_nplt
 
 gc()
 
+# kg_diff
+d1kg<-d1t %>% filter(kg_diffm==1 & !is.na(kg_diff))
+d2kg<-d2t %>% filter(kg_diffm==1 & !is.na(kg_diff))
+d3kg<-d3t %>% filter(kg_diffm==1 & !is.na(kg_diff))
+d4kg<-d4t %>% filter(kg_diffm==1 & !is.na(kg_diff))
+d5kg<-d5t %>% filter(kg_diffm==1 & !is.na(kg_diff))
+d5kg<-d5t %>% filter(kg_diffm==1 & !is.na(kg_diff))
+d6kg<-d6t %>% filter(kg_diffm==1 & !is.na(kg_diff))
+d7kg<-d7t %>% filter(kg_diffm==1 & !is.na(kg_diff))
+
+d1nkg<-d1t %>% filter(kg_diffm==0 & !is.na(kg_diff))
+d2nkg<-d2t %>% filter(kg_diffm==0 & !is.na(kg_diff))
+d3nkg<-d3t %>% filter(kg_diffm==0 & !is.na(kg_diff))
+d4nkg<-d4t %>% filter(kg_diffm==0 & !is.na(kg_diff))
+d5nkg<-d5t %>% filter(kg_diffm==0 & !is.na(kg_diff))
+d6nkg<-d6t %>% filter(kg_diffm==0 & !is.na(kg_diff))
+d7nkg<-d7t %>% filter(kg_diffm==0 & !is.na(kg_diff))
+
+gc()
+
+fuzz1kg<-rdrobust(x=d1kg$hgb, y=d1kg$death_hospice, c=7, fuzzy=d1kg$tx, p=1, h=1)
+gc()
+fuzz2kg<-rdrobust(x=d2kg$hgb, y=d2kg$death_hospice, c=7, fuzzy=d2kg$tx, p=1, h=1)
+gc()
+fuzz3kg<-rdrobust(x=d3kg$hgb, y=d3kg$death_hospice, c=7, fuzzy=d3kg$tx, p=1, h=1)
+gc()
+fuzz4kg<-rdrobust(x=d4kg$hgb, y=d4kg$death_hospice, c=7, fuzzy=d4kg$tx, p=1, h=1)
+gc()
+fuzz5kg<-rdrobust(x=d5kg$hgb, y=d5kg$death_hospice, c=7, fuzzy=d5kg$tx, p=1, h=1)
+gc()
+fuzz6kg<-rdrobust(x=d6kg$hgb, y=d6kg$death_hospice, c=7, fuzzy=d6kg$tx, p=1, h=1)
+gc()
+fuzz7kg<-rdrobust(x=d7kg$hgb, y=d7kg$death_hospice, c=7, fuzzy=d7kg$tx, p=1, h=1)
+gc()
+
+
+rdd_outcome_fuzzykg<-rbind(
+              rd_extraction(fuzz1kg),
+              rd_extraction(fuzz2kg),
+              rd_extraction(fuzz3kg),
+              rd_extraction(fuzz4kg),
+              rd_extraction(fuzz5kg),
+              rd_extraction(fuzz6kg),
+              rd_extraction(fuzz7kg)) %>%
+    data.frame() %>%
+  setNames(row.names)
+
+View(rdd_outcome_fuzzykg)
+
+
+fuzz2nkg<-rdrobust(x=d2nkg$hgb, y=d2nkg$death_hospice, c=7, fuzzy=d2nkg$tx, p=1, h=1)
+gc()
+fuzz3nkg<-rdrobust(x=d3nkg$hgb, y=d3nkg$death_hospice, c=7, fuzzy=d3nkg$tx, p=1, h=1)
+gc()
+fuzz4nkg<-rdrobust(x=d4nkg$hgb, y=d4nkg$death_hospice, c=7, fuzzy=d4nkg$tx, p=1, h=1)
+gc()
+fuzz5nkg<-rdrobust(x=d5nkg$hgb, y=d5nkg$death_hospice, c=7, fuzzy=d5nkg$tx, p=1, h=1)
+gc()
+fuzz6nkg<-rdrobust(x=d6nkg$hgb, y=d6nkg$death_hospice, c=7, fuzzy=d6nkg$tx, p=1, h=1)
+gc()
+fuzz7nkg<-rdrobust(x=d7nkg$hgb, y=d7nkg$death_hospice, c=7, fuzzy=d7nkg$tx, p=1, h=1)
+gc()
+
+
+rdd_outcome_fuzzynkg<-rbind(
+              rd_extraction(fuzz2nkg),
+              rd_extraction(fuzz3nkg),
+              rd_extraction(fuzz4nkg),
+              rd_extraction(fuzz5nkg),
+              rd_extraction(fuzz6nkg),
+              rd_extraction(fuzz7nkg)) %>%
+    data.frame() %>%
+  setNames(row.names)
+
+View(rdd_outcome_fuzzynkg)
+
+
+
+# cumulative_fluid_volume
+d1cumulative_fluid_volume<-d1t %>% filter(cumulative_fluid_volume2m==1)
+d2cumulative_fluid_volume<-d2t %>% filter(cumulative_fluid_volume2m==1)
+d3cumulative_fluid_volume<-d3t %>% filter(cumulative_fluid_volume2m==1)
+d4cumulative_fluid_volume<-d4t %>% filter(cumulative_fluid_volume2m==1)
+d5cumulative_fluid_volume<-d5t %>% filter(cumulative_fluid_volume2m==1)
+d5cumulative_fluid_volume<-d5t %>% filter(cumulative_fluid_volume2m==1)
+d6cumulative_fluid_volume<-d6t %>% filter(cumulative_fluid_volume2m==1)
+d7cumulative_fluid_volume<-d7t %>% filter(cumulative_fluid_volume2m==1)
+
+d1ncumulative_fluid_volume<-d1t %>% filter(cumulative_fluid_volume2m==0)
+d2ncumulative_fluid_volume<-d2t %>% filter(cumulative_fluid_volume2m==0)
+d3ncumulative_fluid_volume<-d3t %>% filter(cumulative_fluid_volume2m==0)
+d4ncumulative_fluid_volume<-d4t %>% filter(cumulative_fluid_volume2m==0)
+d5ncumulative_fluid_volume<-d5t %>% filter(cumulative_fluid_volume2m==0)
+d6ncumulative_fluid_volume<-d6t %>% filter(cumulative_fluid_volume2m==0)
+d7ncumulative_fluid_volume<-d7t %>% filter(cumulative_fluid_volume2m==0)
+
+gc()
+
+fuzz1cumulative_fluid_volume<-rdrobust(x=d1cumulative_fluid_volume$hgb, y=d1cumulative_fluid_volume$death_hospice, c=7, fuzzy=d1cumulative_fluid_volume$tx, p=1, h=1)
+gc()
+fuzz2cumulative_fluid_volume<-rdrobust(x=d2cumulative_fluid_volume$hgb, y=d2cumulative_fluid_volume$death_hospice, c=7, fuzzy=d2cumulative_fluid_volume$tx, p=1, h=1)
+gc()
+fuzz3cumulative_fluid_volume<-rdrobust(x=d3cumulative_fluid_volume$hgb, y=d3cumulative_fluid_volume$death_hospice, c=7, fuzzy=d3cumulative_fluid_volume$tx, p=1, h=1)
+gc()
+fuzz4cumulative_fluid_volume<-rdrobust(x=d4cumulative_fluid_volume$hgb, y=d4cumulative_fluid_volume$death_hospice, c=7, fuzzy=d4cumulative_fluid_volume$tx, p=1, h=1)
+gc()
+fuzz5cumulative_fluid_volume<-rdrobust(x=d5cumulative_fluid_volume$hgb, y=d5cumulative_fluid_volume$death_hospice, c=7, fuzzy=d5cumulative_fluid_volume$tx, p=1, h=1)
+gc()
+fuzz6cumulative_fluid_volume<-rdrobust(x=d6cumulative_fluid_volume$hgb, y=d6cumulative_fluid_volume$death_hospice, c=7, fuzzy=d6cumulative_fluid_volume$tx, p=1, h=1)
+gc()
+fuzz7cumulative_fluid_volume<-rdrobust(x=d7cumulative_fluid_volume$hgb, y=d7cumulative_fluid_volume$death_hospice, c=7, fuzzy=d7cumulative_fluid_volume$tx, p=1, h=1)
+gc()
+
+
+rdd_outcome_fuzzycumulative_fluid_volume<-rbind(
+              rd_extraction(fuzz1cumulative_fluid_volume),
+              rd_extraction(fuzz2cumulative_fluid_volume),
+              rd_extraction(fuzz3cumulative_fluid_volume),
+              rd_extraction(fuzz4cumulative_fluid_volume),
+              rd_extraction(fuzz5cumulative_fluid_volume),
+              rd_extraction(fuzz6cumulative_fluid_volume),
+              rd_extraction(fuzz7cumulative_fluid_volume)) %>%
+    data.frame() %>%
+  setNames(row.names)
+
+View(rdd_outcome_fuzzycumulative_fluid_volume)
+
+
+fuzz1ncumulative_fluid_volume<-rdrobust(x=d1ncumulative_fluid_volume$hgb, y=d1ncumulative_fluid_volume$death_hospice, c=7, fuzzy=d1ncumulative_fluid_volume$tx, p=1, h=1)
+gc()
+fuzz2ncumulative_fluid_volume<-rdrobust(x=d2ncumulative_fluid_volume$hgb, y=d2ncumulative_fluid_volume$death_hospice, c=7, fuzzy=d2ncumulative_fluid_volume$tx, p=1, h=1)
+gc()
+fuzz3ncumulative_fluid_volume<-rdrobust(x=d3ncumulative_fluid_volume$hgb, y=d3ncumulative_fluid_volume$death_hospice, c=7, fuzzy=d3ncumulative_fluid_volume$tx, p=1, h=1)
+gc()
+fuzz4ncumulative_fluid_volume<-rdrobust(x=d4ncumulative_fluid_volume$hgb, y=d4ncumulative_fluid_volume$death_hospice, c=7, fuzzy=d4ncumulative_fluid_volume$tx, p=1, h=1)
+gc()
+fuzz5ncumulative_fluid_volume<-rdrobust(x=d5ncumulative_fluid_volume$hgb, y=d5ncumulative_fluid_volume$death_hospice, c=7, fuzzy=d5ncumulative_fluid_volume$tx, p=1, h=1)
+gc()
+fuzz6ncumulative_fluid_volume<-rdrobust(x=d6ncumulative_fluid_volume$hgb, y=d6ncumulative_fluid_volume$death_hospice, c=7, fuzzy=d6ncumulative_fluid_volume$tx, p=1, h=1)
+gc()
+fuzz7ncumulative_fluid_volume<-rdrobust(x=d7ncumulative_fluid_volume$hgb, y=d7ncumulative_fluid_volume$death_hospice, c=7, fuzzy=d7ncumulative_fluid_volume$tx, p=1, h=1)
+gc()
+
+
+rdd_outcome_fuzzyncumulative_fluid_volume<-rbind(
+              rd_extraction(fuzz1ncumulative_fluid_volume),
+              rd_extraction(fuzz2ncumulative_fluid_volume),
+              rd_extraction(fuzz3ncumulative_fluid_volume),
+              rd_extraction(fuzz4ncumulative_fluid_volume),
+              rd_extraction(fuzz5ncumulative_fluid_volume),
+              rd_extraction(fuzz6ncumulative_fluid_volume),
+              rd_extraction(fuzz7ncumulative_fluid_volume)) %>%
+    data.frame() %>%
+  setNames(row.names)
+
+View(rdd_outcome_fuzzyncumulative_fluid_volume)
+
+
+# ma_cumulative_fluid_volume
+ma_cumulative_fluid_volume<-metagen(TE=rdd_outcome_fuzzycumulative_fluid_volume$coef, seTE=rdd_outcome_fuzzycumulative_fluid_volume$se, sm="RD", comb.random=T, studlab=day)
+ma_cumulative_fluid_volume
+
+mr_cumulative_fluid_volume<-metareg(ma_cumulative_fluid_volume, ~day)
+mr_cumulative_fluid_volume
+
+# ma_ncumulative_fluid_volume
+ma_ncumulative_fluid_volume<-metagen(TE=rdd_outcome_fuzzyncumulative_fluid_volume$coef, seTE=rdd_outcome_fuzzyncumulative_fluid_volume$se, sm="RD", comb.random=T, studlab=day)
+ma_ncumulative_fluid_volume
+
+mr_ncumulative_fluid_volume<-metareg(ma_ncumulative_fluid_volume, ~day)
+mr_ncumulative_fluid_volume
+
+gc()
+
+
+
+
+
+# diuretic_on_day 
+d1diuretic_on_day<-d1t %>% filter(diuretic_on_day==1)
+d2diuretic_on_day<-d2t %>% filter(diuretic_on_day==1)
+d3diuretic_on_day<-d3t %>% filter(diuretic_on_day==1)
+d4diuretic_on_day<-d4t %>% filter(diuretic_on_day==1)
+d5diuretic_on_day<-d5t %>% filter(diuretic_on_day==1)
+d5diuretic_on_day<-d5t %>% filter(diuretic_on_day==1)
+d6diuretic_on_day<-d6t %>% filter(diuretic_on_day==1)
+d7diuretic_on_day<-d7t %>% filter(diuretic_on_day==1)
+
+d1ndiuretic_on_day<-d1t %>% filter(diuretic_on_day==0)
+d2ndiuretic_on_day<-d2t %>% filter(diuretic_on_day==0)
+d3ndiuretic_on_day<-d3t %>% filter(diuretic_on_day==0)
+d4ndiuretic_on_day<-d4t %>% filter(diuretic_on_day==0)
+d5ndiuretic_on_day<-d5t %>% filter(diuretic_on_day==0)
+d6ndiuretic_on_day<-d6t %>% filter(diuretic_on_day==0)
+d7ndiuretic_on_day<-d7t %>% filter(diuretic_on_day==0)
+
+fuzz1diuretic_on_day<-rdrobust(x=d1diuretic_on_day$hgb, y=d1diuretic_on_day$death_hospice, c=7, fuzzy=d1diuretic_on_day$tx, p=1, h=1)
+gc()
+fuzz2diuretic_on_day<-rdrobust(x=d2diuretic_on_day$hgb, y=d2diuretic_on_day$death_hospice, c=7, fuzzy=d2diuretic_on_day$tx, p=1, h=1)
+gc()
+fuzz3diuretic_on_day<-rdrobust(x=d3diuretic_on_day$hgb, y=d3diuretic_on_day$death_hospice, c=7, fuzzy=d3diuretic_on_day$tx, p=1, h=1)
+gc()
+fuzz4diuretic_on_day<-rdrobust(x=d4diuretic_on_day$hgb, y=d4diuretic_on_day$death_hospice, c=7, fuzzy=d4diuretic_on_day$tx, p=1, h=1)
+gc()
+fuzz5diuretic_on_day<-rdrobust(x=d5diuretic_on_day$hgb, y=d5diuretic_on_day$death_hospice, c=7, fuzzy=d5diuretic_on_day$tx, p=1, h=1)
+gc()
+fuzz6diuretic_on_day<-rdrobust(x=d6diuretic_on_day$hgb, y=d6diuretic_on_day$death_hospice, c=7, fuzzy=d6diuretic_on_day$tx, p=1, h=1)
+gc()
+fuzz7diuretic_on_day<-rdrobust(x=d7diuretic_on_day$hgb, y=d7diuretic_on_day$death_hospice, c=7, fuzzy=d7diuretic_on_day$tx, p=1, h=1)
+gc()
+
+
+rdd_outcome_fuzzydiuretic_on_day<-rbind(
+              rd_extraction(fuzz1diuretic_on_day),
+              rd_extraction(fuzz2diuretic_on_day),
+              rd_extraction(fuzz3diuretic_on_day),
+              rd_extraction(fuzz4diuretic_on_day),
+              rd_extraction(fuzz5diuretic_on_day),
+              rd_extraction(fuzz6diuretic_on_day),
+              rd_extraction(fuzz7diuretic_on_day)) %>%
+    data.frame() %>%
+  setNames(row.names)
+
+View(rdd_outcome_fuzzydiuretic_on_day)
+
+
+fuzz1ndiuretic_on_day<-rdrobust(x=d1ndiuretic_on_day$hgb, y=d1ndiuretic_on_day$death_hospice, c=7, fuzzy=d1ndiuretic_on_day$tx, p=1, h=1)
+gc()
+fuzz2ndiuretic_on_day<-rdrobust(x=d2ndiuretic_on_day$hgb, y=d2ndiuretic_on_day$death_hospice, c=7, fuzzy=d2ndiuretic_on_day$tx, p=1, h=1)
+gc()
+fuzz3ndiuretic_on_day<-rdrobust(x=d3ndiuretic_on_day$hgb, y=d3ndiuretic_on_day$death_hospice, c=7, fuzzy=d3ndiuretic_on_day$tx, p=1, h=1)
+gc()
+fuzz4ndiuretic_on_day<-rdrobust(x=d4ndiuretic_on_day$hgb, y=d4ndiuretic_on_day$death_hospice, c=7, fuzzy=d4ndiuretic_on_day$tx, p=1, h=1)
+gc()
+fuzz5ndiuretic_on_day<-rdrobust(x=d5ndiuretic_on_day$hgb, y=d5ndiuretic_on_day$death_hospice, c=7, fuzzy=d5ndiuretic_on_day$tx, p=1, h=1)
+gc()
+fuzz6ndiuretic_on_day<-rdrobust(x=d6ndiuretic_on_day$hgb, y=d6ndiuretic_on_day$death_hospice, c=7, fuzzy=d6ndiuretic_on_day$tx, p=1, h=1)
+gc()
+fuzz7ndiuretic_on_day<-rdrobust(x=d7ndiuretic_on_day$hgb, y=d7ndiuretic_on_day$death_hospice, c=7, fuzzy=d7ndiuretic_on_day$tx, p=1, h=1)
+gc()
+
+
+rdd_outcome_fuzzyndiuretic_on_day<-rbind(
+              rd_extraction(fuzz1ndiuretic_on_day),
+              rd_extraction(fuzz2ndiuretic_on_day),
+              rd_extraction(fuzz3ndiuretic_on_day),
+              rd_extraction(fuzz4ndiuretic_on_day),
+              rd_extraction(fuzz5ndiuretic_on_day),
+              rd_extraction(fuzz6ndiuretic_on_day),
+              rd_extraction(fuzz7ndiuretic_on_day)) %>%
+    data.frame() %>%
+  setNames(row.names)
+
+View(rdd_outcome_fuzzyndiuretic_on_day)
+
+
+# ma_diuretic_on_day
+ma_diuretic_on_day<-metagen(TE=rdd_outcome_fuzzydiuretic_on_day$coef, seTE=rdd_outcome_fuzzydiuretic_on_day$se, sm="RD", comb.random=T, studlab=day)
+ma_diuretic_on_day
+
+mr_diuretic_on_day<-metareg(ma_diuretic_on_day, ~day)
+mr_diuretic_on_day
+
+# ma_ndiuretic_on_day
+ma_ndiuretic_on_day<-metagen(TE=rdd_outcome_fuzzyndiuretic_on_day$coef, seTE=rdd_outcome_fuzzyndiuretic_on_day$se, sm="RD", comb.random=T, studlab=day)
+ma_ndiuretic_on_day
+
+mr_ndiuretic_on_day<-metareg(ma_ndiuretic_on_day, ~day)
+mr_ndiuretic_on_day
+
 ```
 
 
@@ -2508,7 +2905,7 @@ day_combined<-c(1,2,3,4,5,6,7,1,2,3,4,5,6,7)
 sepsis_combined<-c(1,1,1,1,1,1,1,0,0,0,0,0,0,0)
 
 sepsis_combined_explore2<-metagen(TE=c(rdd_outcome_fuzzysepsis$coef, rdd_outcome_fuzzynsepsis$coef), seTE=c(rdd_outcome_fuzzysepsis$se, rdd_outcome_fuzzynsepsis$se), sm="RD", comb.random=T, studlab=day_combined_name)
-prior_tx_combined_explore2
+sepsis_combined_explore2
 
 sepsis_combined_explore2_day<-metareg(sepsis_combined_explore2, ~day_combined)
 sepsis_combined_explore2_day
@@ -2589,7 +2986,7 @@ day_combined<-c(1,2,3,4,5,6,7,1,2,3,4,5,6,7)
 surgery_combined<-c(1,1,1,1,1,1,1,0,0,0,0,0,0,0)
 
 surgery_combined_explore2<-metagen(TE=c(rdd_outcome_fuzzysurgery$coef, rdd_outcome_fuzzynsurgery$coef), seTE=c(rdd_outcome_fuzzysurgery$se, rdd_outcome_fuzzynsurgery$se), sm="RD", comb.random=T, studlab=day_combined_name)
-prior_tx_combined_explore2
+surgery_combined_explore2
 
 surgery_combined_explore2_day<-metareg(surgery_combined_explore2, ~day_combined)
 surgery_combined_explore2_day
@@ -2616,7 +3013,7 @@ day_combined<-c(1,2,3,4,5,6,7,1,2,3,4,5,6,7)
 sofa_combined<-c(1,1,1,1,1,1,1,0,0,0,0,0,0,0)
 
 sofa_combined_explore2<-metagen(TE=c(rdd_outcome_fuzzysofa$coef, rdd_outcome_fuzzynsofa$coef), seTE=c(rdd_outcome_fuzzysofa$se, rdd_outcome_fuzzynsofa$se), sm="RD", comb.random=T, studlab=day_combined_name)
-prior_tx_combined_explore2
+sofa_combined_explore2
 
 sofa_combined_explore2_day<-metareg(sofa_combined_explore2, ~day_combined)
 sofa_combined_explore2_day
@@ -2772,7 +3169,94 @@ forest(prior_tx_combined_explore2, layout = "JAMA",
 bubble(prior_tx_combined_explore2_day, studlab=T, pos.studlab=2, offset=-0.2, ylim=c(-0.05, 0.05), xlab="Hospital day", ylab="Risk difference (Transfusion minus no transfusion)")
 bubble(prior_tx_combined_explore2_other, studlab=T, pos.studlab=2, offset=-0.2, ylim=c(-0.05, 0.05), xlab="Hospital day", ylab="Risk difference (Transfusion minus no transfusion)")
 
+# kg
+day_combined_name<-c("Day 1; Weight change 0+ Kg", "Day 2; Weight change 0+ Kg", "Day 3; Weight change 0+ Kg", "Day 4; Weight change 0+ Kg", "Day 5; Weight change 0+ Kg", "Day 6; Weight change 0+ Kg", "Day 7; Weight change 0+ Kg", "Day 2; Weight change <0 Kg", "Day 3; Weight change <0 Kg", "Day 4; Weight change <0 Kg", "Day 5; Weight change <0 Kg", "Day 6; Weight change <0 Kg", "Day 7; Weight change <0 Kg")
+day_combined<-c(1,2,3,4,5,6,7,2,3,4,5,6,7)
+kg_combined<-c(1,1,1,1,1,1,1,0,0,0,0,0,0)
+
+kg_combined_explore2<-metagen(TE=c(rdd_outcome_fuzzykg$coef, rdd_outcome_fuzzynkg$coef), seTE=c(rdd_outcome_fuzzykg$se, rdd_outcome_fuzzynkg$se), sm="RD", comb.random=T, studlab=day_combined_name)
+kg_combined_explore2
+
+kg_combined_explore2_day<-metareg(kg_combined_explore2, ~day_combined)
+kg_combined_explore2_day
+
+kg_combined_explore2_other<-metareg(kg_combined_explore2, ~kg_combined)
+kg_combined_explore2_other
+
+kg_combined_explore2_both<-metareg(kg_combined_explore2, ~kg_combined+day_combined)
+kg_combined_explore2_both
+
+gc()
+
+forest(kg_combined_explore2, layout = "JAMA",
+       comb.fixed=F,
+       )
+
+bubble(kg_combined_explore2_day, studlab=T, pos.studlab=2, offset=-0.2, ylim=c(-0.05, 0.05), xlab="Hospital day", ylab="Risk difference (Transfusion minus no transfusion)")
+bubble(kg_combined_explore2_other, studlab=T, pos.studlab=2, offset=-0.2, ylim=c(-0.05, 0.05), xlab="Hospital day", ylab="Risk difference (Transfusion minus no transfusion)")
+
+
+# cumulative_fluid_volume
+day_combined_name<-c("Day 1; Fluid volume 2+", "Day 2;  Fluid volume 1+", "Day 3;  Fluid volume 1+", "Day 4;  Fluid volume 1+", "Day 5;  Fluid volume 1+", "Day 6;  Fluid volume 1+", "Day 7;  Fluid volume 1+", "Day 1;  Fluid volume <1", "Day 2;  Fluid volume <1", "Day 3;  Fluid volume <1", "Day 4;  Fluid volume <1", "Day 5;  Fluid volume <1", "Day 6;  Fluid volume <1", "Day 7;  Fluid volume <1")
+day_combined<-c(1,2,3,4,5,6,7,1,2,3,4,5,6,7)
+cumulative_fluid_volume_combined<-c(1,1,1,1,1,1,1,0,0,0,0,0,0,0)
+
+cumulative_fluid_volume_combined_explore2<-metagen(TE=c(rdd_outcome_fuzzycumulative_fluid_volume$coef, rdd_outcome_fuzzyncumulative_fluid_volume$coef), seTE=c(rdd_outcome_fuzzycumulative_fluid_volume$se, rdd_outcome_fuzzyncumulative_fluid_volume$se), sm="RD", comb.random=T, studlab=day_combined_name)
+cumulative_fluid_volume_combined_explore2
+
+cumulative_fluid_volume_combined_explore2_day<-metareg(cumulative_fluid_volume_combined_explore2, ~day_combined)
+cumulative_fluid_volume_combined_explore2_day
+
+cumulative_fluid_volume_combined_explore2_other<-metareg(cumulative_fluid_volume_combined_explore2, ~cumulative_fluid_volume_combined)
+cumulative_fluid_volume_combined_explore2_other
+
+cumulative_fluid_volume_combined_explore2_both<-metareg(cumulative_fluid_volume_combined_explore2, ~cumulative_fluid_volume_combined+day_combined)
+cumulative_fluid_volume_combined_explore2_both
+
+gc()
+
+forest(cumulative_fluid_volume_combined_explore2, layout = "JAMA",
+       comb.fixed=F,
+       )
+
+bubble(cumulative_fluid_volume_combined_explore2_day, studlab=T, pos.studlab=2, offset=-0.2, ylim=c(-0.05, 0.05), xlab="Hospital day", ylab="Risk difference (Transfusion minus no transfusion)")
+bubble(cumulative_fluid_volume_combined_explore2_other, studlab=T, pos.studlab=2, offset=-0.2, ylim=c(-0.05, 0.05), xlab="Hospital day", ylab="Risk difference (Transfusion minus no transfusion)")
+
+
+
+# diuretic_on_day
+day_combined_name<-c("Day 1; Diuretic", "Day 2; Diuretic", "Day 3; Diuretic", "Day 4; Diuretic", "Day 5; Diuretic", "Day 6; Diuretic", "Day 7; Diuretic", "Day 1; No Diuretic", "Day 2; No Diuretic", "Day 3; No Diuretic", "Day 4; No Diuretic", "Day 5; No Diuretic", "Day 6; No Diuretic", "Day 7; No Diuretic")
+day_combined<-c(1,2,3,4,5,6,7,1,2,3,4,5,6,7)
+diuretic_on_day_combined<-c(1,1,1,1,1,1,1,0,0,0,0,0,0,0)
+
+diuretic_on_day_combined_explore2<-metagen(TE=c(rdd_outcome_fuzzydiuretic_on_day$coef, rdd_outcome_fuzzyndiuretic_on_day$coef), seTE=c(rdd_outcome_fuzzydiuretic_on_day$se, rdd_outcome_fuzzyndiuretic_on_day$se), sm="RD", comb.random=T, studlab=day_combined_name)
+diuretic_on_day_combined_explore2
+
+diuretic_on_day_combined_explore2_day<-metareg(diuretic_on_day_combined_explore2, ~day_combined)
+diuretic_on_day_combined_explore2_day
+
+diuretic_on_day_combined_explore2_other<-metareg(diuretic_on_day_combined_explore2, ~diuretic_on_day_combined)
+diuretic_on_day_combined_explore2_other
+
+diuretic_on_day_combined_explore2_both<-metareg(diuretic_on_day_combined_explore2, ~diuretic_on_day_combined+day_combined)
+diuretic_on_day_combined_explore2_both
+
+gc()
+
+forest(diuretic_on_day_combined_explore2, layout = "JAMA",
+       comb.fixed=F,
+       )
+
+bubble(diuretic_on_day_combined_explore2_day, studlab=T, pos.studlab=2, offset=-0.2, ylim=c(-0.05, 0.05), xlab="Hospital day", ylab="Risk difference (Transfusion minus no transfusion)")
+bubble(diuretic_on_day_combined_explore2_other, studlab=T, pos.studlab=2, offset=-0.2, ylim=c(-0.05, 0.05), xlab="Hospital day", ylab="Risk difference (Transfusion minus no transfusion)")
+
+
+gc()
+
 ```
+
+
+
 
 
 
